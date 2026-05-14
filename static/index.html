@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>adidas AppSec AI Agent Risk Assessment Platform</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+  body { font-family: 'Inter', sans-serif; }
+
+  .gradient-bg { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%); }
+
+  .card { background: rgba(255,255,255,0.97); border-radius: 1rem; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+
+  .risk-CRITICAL { background: #fef2f2; border-left: 4px solid #dc2626; }
+  .risk-HIGH     { background: #fff7ed; border-left: 4px solid #ea580c; }
+  .risk-MEDIUM   { background: #fefce8; border-left: 4px solid #ca8a04; }
+  .risk-LOW      { background: #f0fdf4; border-left: 4px solid #16a34a; }
+  .risk-UNKNOWN  { background: #f8fafc; border-left: 4px solid #94a3b8; }
+
+  .badge-CRITICAL { background:#dc2626; color:white; }
+  .badge-HIGH     { background:#ea580c; color:white; }
+  .badge-MEDIUM   { background:#ca8a04; color:white; }
+  .badge-LOW      { background:#16a34a; color:white; }
+  .badge-UNKNOWN  { background:#94a3b8; color:white; }
+
+  .finding-CRITICAL { border-left: 3px solid #dc2626; background: #fef2f2; }
+  .finding-DANGER   { border-left: 3px solid #ea580c; background: #fff7ed; }
+  .finding-WARNING  { border-left: 3px solid #ca8a04; background: #fefce8; }
+  .finding-MEDIUM   { border-left: 3px solid #ca8a04; background: #fefce8; }
+  .finding-HIGH     { border-left: 3px solid #ea580c; background: #fff7ed; }
+  .finding-INFO     { border-left: 3px solid #3b82f6; background: #eff6ff; }
+  .finding-POSITIVE { border-left: 3px solid #16a34a; background: #f0fdf4; }
+
+  .score-ring { transform: rotate(-90deg); }
+  .pulse-ring { animation: pulse-ring 1.5s ease-in-out infinite; }
+  @keyframes pulse-ring {
+    0%,100% { opacity:1; transform: scale(1); }
+    50%      { opacity:0.6; transform: scale(1.05); }
+  }
+  .slide-in { animation: slideIn 0.4s ease-out; }
+  @keyframes slideIn {
+    from { opacity:0; transform: translateY(20px); }
+    to   { opacity:1; transform: translateY(0); }
+  }
+  .spinner { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .score-gauge {
+    background: conic-gradient(var(--gauge-color) var(--gauge-pct), #e5e7eb var(--gauge-pct));
+    border-radius: 50%;
+  }
+  .overflow-y-auto::-webkit-scrollbar { width: 5px; }
+  .overflow-y-auto::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 4px; }
+  .overflow-y-auto::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+  .overflow-y-auto::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+</style>
+</head>
+<body class="min-h-screen bg-gray-50">
+
+<!-- Header -->
+<div class="gradient-bg py-12 px-4">
+  <div class="max-w-4xl mx-auto text-center">
+    <div class="flex items-center justify-center gap-3 mb-4">
+      <div class="text-4xl">🛡️</div>
+      <h1 class="text-3xl font-bold text-white">adidas AppSec AI Agent Risk Assessment Platform</h1>
+    </div>
+
+    <div class="flex justify-center gap-4 mt-4 text-sm text-indigo-300 flex-wrap">
+      <span>⭐ 声誉</span>
+      <span>🌐 deps.dev</span>
+      <span>🤖 能力分析</span>
+      <span>📦 依赖漏洞</span>
+      <span>🛡️ AI安全</span>
+      <span>🔒 隐私</span>
+      <span>⛓️ 供应链</span>
+      <span>🐳 运行时</span>
+    </div>
+  </div>
+</div>
+
+<!-- Input Card -->
+<div class="max-w-2xl mx-auto -mt-6 px-4">
+  <div class="card p-6">
+    <label class="block text-sm font-semibold text-gray-700 mb-2">
+      <i class="fab fa-github mr-1"></i> GitHub Repository URL
+    </label>
+    <div class="flex gap-2">
+      <input id="urlInput" type="text" placeholder="https://github.com/owner/repo"
+        class="flex-1 border border-gray-200 rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+        value=""/>
+      <button id="analyzeBtn" onclick="startAnalysis()"
+        class="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-lg font-semibold text-sm transition-colors flex items-center gap-2">
+        <i class="fas fa-search"></i> Analyze
+      </button>
+    </div>
+
+    <!-- Token toggle -->
+    <div class="mt-3">
+      <button onclick="toggleToken()" class="text-xs text-gray-500 hover:text-indigo-600 flex items-center gap-1">
+        <i class="fas fa-key"></i> <span id="tokenToggleText">Add GitHub Token (optional, increases API rate limit)</span>
+      </button>
+      <div id="tokenSection" class="hidden mt-2">
+        <input id="tokenInput" type="password" placeholder="ghp_xxxxxxxxxxxx"
+          class="w-full border border-gray-200 rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"/>
+        <p class="text-xs text-gray-400 mt-1">Leave blank to use the default token; your token takes priority if provided.</p>
+      </div>
+      <div id="defaultTokenBadge" class="hidden mt-2 text-xs text-green-600 flex items-center gap-1">
+        <i class="fas fa-check-circle"></i> Default token configured — no manual entry needed
+      </div>
+    </div>
+
+    <!-- Example repos -->
+    <div class="mt-3 flex flex-wrap gap-2">
+      <span class="text-xs text-gray-400">Quick test:</span>
+      <button onclick="setExample('https://github.com/openai/openai-agents-python')" class="text-xs text-indigo-600 hover:underline">openai-agents-python</button>
+      <button onclick="setExample('https://github.com/microsoft/autogen')" class="text-xs text-indigo-600 hover:underline">autogen</button>
+      <button onclick="setExample('https://github.com/langchain-ai/langchain')" class="text-xs text-indigo-600 hover:underline">langchain</button>
+      <button onclick="setExample('https://github.com/crewAIInc/crewAI')" class="text-xs text-indigo-600 hover:underline">crewAI</button>
+      <button onclick="setExample('https://github.com/nousresearch/hermes-agent')" class="text-xs text-indigo-600 hover:underline">Hermes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Progress Section -->
+<div id="progressSection" class="hidden max-w-2xl mx-auto mt-6 px-4">
+  <div class="card p-6">
+    <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+      <i class="fas fa-circle-notch spinner text-indigo-500"></i>
+      Analyzing <span id="analyzeTarget" class="text-indigo-600"></span>
+    </h3>
+    <div id="progressItems" class="space-y-3"></div>
+  </div>
+</div>
+
+<!-- Error Section -->
+<div id="errorSection" class="hidden max-w-2xl mx-auto mt-6 px-4">
+  <div class="card p-6 border-l-4 border-red-500 bg-red-50">
+    <p class="text-red-700 font-semibold"><i class="fas fa-exclamation-triangle mr-2"></i><span id="errorMsg"></span></p>
+  </div>
+</div>
+
+<!-- Results Section -->
+<div id="resultsSection" class="hidden max-w-4xl mx-auto mt-8 px-4 pb-16 slide-in">
+
+  <!-- Overall Score -->
+  <div id="overallCard" class="card p-8 mb-6 text-center">
+    <div class="flex items-center justify-center gap-6 flex-wrap">
+      <!-- Score Circle -->
+      <div class="relative w-32 h-32 flex-shrink-0">
+        <svg class="w-full h-full" viewBox="0 0 120 120">
+          <circle cx="60" cy="60" r="54" fill="none" stroke="#e5e7eb" stroke-width="12"/>
+          <circle id="scoreCircle" cx="60" cy="60" r="54" fill="none" stroke="#6366f1" stroke-width="12"
+            stroke-linecap="round" stroke-dasharray="339.3" stroke-dashoffset="339.3"
+            class="score-ring transition-all duration-1000" style="transform-origin: center; transform: rotate(-90deg)"/>
+        </svg>
+        <div class="absolute inset-0 flex flex-col items-center justify-center">
+          <span id="overallScore" class="text-3xl font-bold text-gray-800">--</span>
+          <span class="text-xs text-gray-400">/ 100</span>
+        </div>
+      </div>
+      <!-- Text info -->
+      <div class="text-left">
+        <div id="overallEmoji" class="text-5xl mb-2">⏳</div>
+        <div id="overallLabel" class="text-2xl font-bold text-gray-800">Analyzing...</div>
+        <div id="overallSub" class="text-gray-500 text-sm mt-1"></div>
+        <div id="overallBadge" class="inline-block mt-2 px-4 py-1 rounded-full text-sm font-semibold"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dimension Cards Grid -->
+  <div id="dimensionGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6"></div>
+
+  <!-- Export buttons -->
+  <div class="flex gap-3 justify-end mt-4">
+    <button onclick="exportJSON()" class="text-sm text-gray-500 hover:text-indigo-600 border border-gray-200 rounded-lg px-4 py-2 flex items-center gap-2">
+      <i class="fas fa-download"></i> Export JSON
+    </button>
+    <button onclick="window.print()" class="text-sm text-gray-500 hover:text-indigo-600 border border-gray-200 rounded-lg px-4 py-2 flex items-center gap-2">
+      <i class="fas fa-print"></i> Print Report
+    </button>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="text-center py-8 text-xs text-gray-400">
+  Data sources: GitHub API · <a href="https://securityscorecards.dev" class="hover:text-indigo-500">OpenSSF Scorecard</a> ·
+  <a href="https://osv.dev" class="hover:text-indigo-500">OSV.dev</a> · For security assessment reference only
+</div>
+
+<script>
+  const PHASE_META = {
+    github:       { icon: '⭐', label: '声誉与活跃度',         fullWidth: false },
+    depsdev:      { icon: '🌐', label: '依赖包健康度',       fullWidth: false },
+    code:         { icon: '🤖', label: 'Agent 能力分析',      fullWidth: true  },
+    deps:         { icon: '📦', label: '依赖漏洞扫描', fullWidth: true  },
+    ai_safety:    { icon: '🛡️', label: 'AI 安全护栏',          fullWidth: true  },
+    privacy:      { icon: '🔒', label: '数据隐私',                  fullWidth: false },
+    supply_chain: { icon: '⛓️', label: '供应链完整性',        fullWidth: false },
+    runtime:      { icon: '🐳', label: '运行时隔离',             fullWidth: false },
+  };
+
+// Desired display order
+const PHASE_ORDER = ['code', 'ai_safety', 'github', 'depsdev', 'deps', 'privacy', 'supply_chain', 'runtime'];
+
+let allResults = {};
+let currentTarget = '';
+
+function setExample(url) {
+  document.getElementById('urlInput').value = url;
+}
+function toggleToken() {
+  const sec = document.getElementById('tokenSection');
+  sec.classList.toggle('hidden');
+}
+
+function startAnalysis() {
+  const url = document.getElementById('urlInput').value.trim();
+  if (!url) { alert('Please enter a GitHub repository URL'); return; }
+  const token = document.getElementById('tokenInput').value.trim();
+
+  // Reset UI
+  allResults = {};
+  document.getElementById('progressSection').classList.remove('hidden');
+  document.getElementById('resultsSection').classList.add('hidden');
+  document.getElementById('errorSection').classList.add('hidden');
+  document.getElementById('progressItems').innerHTML = '';
+  document.getElementById('dimensionGrid').innerHTML = '';
+  document.getElementById('analyzeBtn').disabled = true;
+  document.getElementById('analyzeBtn').innerHTML = '<i class="fas fa-circle-notch spinner"></i> Analyzing...';
+
+  // Init progress items in PHASE_ORDER
+  PHASE_ORDER.forEach(key => {
+    const meta = PHASE_META[key];
+    if (!meta) return;
+    const el = document.createElement('div');
+    el.id = `prog-${key}`;
+    el.className = 'flex items-center gap-3 p-3 rounded-lg bg-gray-50';
+    el.innerHTML = `
+      <span class="text-lg">${meta.icon}</span>
+      <span class="flex-1 text-sm text-gray-600">${meta.label}</span>
+      <span id="prog-status-${key}" class="text-xs text-gray-400">等待中</span>
+    `;
+    document.getElementById('progressItems').appendChild(el);
+  });
+
+  const params = new URLSearchParams({ url });
+  if (token) params.set('token', token);
+
+  const es = new EventSource(`/api/analyze?${params}`);
+
+  es.onmessage = (e) => {
+    const data = JSON.parse(e.data);
+    handleEvent(data);
+    if (data.type === 'complete' || data.type === 'error') {
+      es.close();
+      document.getElementById('analyzeBtn').disabled = false;
+      document.getElementById('analyzeBtn').innerHTML = '<i class="fas fa-search"></i> Analyze';
+    }
+  };
+
+  es.onerror = () => {
+    es.close();
+    document.getElementById('analyzeBtn').disabled = false;
+    document.getElementById('analyzeBtn').innerHTML = '<i class="fas fa-search"></i> Analyze';
+    showError('Connection lost. Please check if the server is running.');
+  };
+}
+
+function handleEvent(data) {
+  if (data.type === 'start') {
+    currentTarget = `${data.owner}/${data.repo}`;
+    document.getElementById('analyzeTarget').textContent = currentTarget;
+  }
+
+  if (data.type === 'error') {
+    showError(data.message);
+    document.getElementById('progressSection').classList.add('hidden');
+    return;
+  }
+
+  if (data.type === 'progress') {
+    const el = document.getElementById(`prog-${data.phase}`);
+    const st = document.getElementById(`prog-status-${data.phase}`);
+    if (el) el.className = 'flex items-center gap-3 p-3 rounded-lg bg-indigo-50';
+    if (st) st.innerHTML = '<i class="fas fa-circle-notch spinner text-indigo-500"></i> Running';
+  }
+
+  if (data.type === 'result') {
+    allResults[data.phase] = data.data;
+    const st = document.getElementById(`prog-status-${data.phase}`);
+    const el = document.getElementById(`prog-${data.phase}`);
+    const rl = data.data.risk_level;
+    const icon = rl === 'LOW' ? '✅' : rl === 'MEDIUM' ? '⚠️' : rl === 'HIGH' ? '🔴' : rl === 'CRITICAL' ? '🚨' : '❓';
+    if (st) st.innerHTML = `${icon} ${rl} RISK`;
+    if (el) el.className = `flex items-center gap-3 p-3 rounded-lg risk-${rl}`;
+
+    // Show results section and render dimension card
+    document.getElementById('resultsSection').classList.remove('hidden');
+    renderDimensionCard(data.phase, data.name, data.data);
+  }
+
+  if (data.type === 'complete') {
+    document.getElementById('progressSection').classList.add('hidden');
+    renderOverallScore(data.overall);
+  }
+}
+
+function renderOverallScore(overall) {
+  const score = overall.score;
+  const risk = overall.risk_level;
+  const colorMap = { CRITICAL:'#dc2626', HIGH:'#ea580c', MEDIUM:'#ca8a04', LOW:'#16a34a', UNKNOWN:'#94a3b8' };
+  const color = colorMap[risk] || '#6366f1';
+
+  document.getElementById('overallScore').textContent = score;
+  document.getElementById('overallEmoji').textContent = overall.emoji;
+  document.getElementById('overallLabel').textContent = overall.label;
+  document.getElementById('overallSub').textContent = `Repository: ${currentTarget}`;
+  document.getElementById('overallBadge').textContent = risk + ' RISK';
+  document.getElementById('overallBadge').className = `inline-block mt-2 px-4 py-1 rounded-full text-sm font-semibold badge-${risk}`;
+
+  // Animate score circle
+  const circle = document.getElementById('scoreCircle');
+  const circumference = 2 * Math.PI * 54;
+  const offset = circumference - (score / 100) * circumference;
+  circle.style.stroke = color;
+  setTimeout(() => {
+    circle.style.strokeDashoffset = offset;
+  }, 100);
+
+  // Color the overall card
+  const cardColors = {
+    CRITICAL: 'border-t-4 border-red-500',
+    HIGH: 'border-t-4 border-orange-500',
+    MEDIUM: 'border-t-4 border-yellow-500',
+    LOW: 'border-t-4 border-green-500',
+    UNKNOWN: 'border-t-4 border-gray-400',
+  };
+  const overallCard = document.getElementById('overallCard');
+  overallCard.className = `card p-8 mb-6 text-center ${cardColors[risk] || ''}`;
+}
+
+function renderDimensionCard(phase, name, data) {
+  const existing = document.getElementById(`dim-${phase}`);
+  if (existing) existing.remove();
+
+  const meta = PHASE_META[phase] || {};
+  const fullWidth = meta.fullWidth || false;
+  const risk = data.risk_level;
+  const score = data.score;
+  let findings = data.findings || [];
+
+  const colorMap = { CRITICAL:'#dc2626', HIGH:'#ea580c', MEDIUM:'#ca8a04', LOW:'#16a34a', UNKNOWN:'#94a3b8' };
+  const color = colorMap[risk] || '#94a3b8';
+
+  // Sort: keep INFO (score breakdown) first, then POSITIVE, CRITICAL, HIGH, MEDIUM, LOW
+  const severityOrder = { INFO:0, POSITIVE:1, CRITICAL:2, HIGH:3, MEDIUM:4, LOW:5 };
+  const infoFindings  = findings.filter(f => f.type === 'INFO');
+  const otherFindings = findings.filter(f => f.type !== 'INFO')
+    .sort((a, b) => (severityOrder[a.type] ?? 9) - (severityOrder[b.type] ?? 9));
+  findings = [...infoFindings, ...otherFindings];
+
+  // Render each finding as a collapsible row
+  // INFO type (score breakdown) is always expanded; others collapsed by default
+  let findingCounter = 0;
+  const findingsHTML = findings.map(f => {
+    const fid = `f-${phase}-${findingCounter++}`;
+    const isInfo = f.type === 'INFO';
+    const titleContent = f.is_html ? f.title : escHtml(f.title);
+    const detailContent = f.detail ? (f.is_html ? f.detail : escHtml(f.detail)) : '';
+
+    const chevronColor = {POSITIVE:'#16a34a', CRITICAL:'#dc2626', HIGH:'#ea580c', MEDIUM:'#ca8a04', LOW:'#94a3b8', INFO:'#6366f1'}[f.type] || '#6b7280';
+
+    if (isInfo) {
+      // Score breakdown: always visible, no toggle
+      return `
+        <div class="finding-${f.type} p-2 rounded text-xs mb-1">
+          <div class="font-medium text-gray-700">${titleContent}</div>
+          ${detailContent ? `<div class="text-gray-500 mt-0.5">${detailContent}</div>` : ''}
+        </div>`;
+    }
+
+    return `
+      <div class="finding-${f.type} rounded text-xs mb-1 overflow-hidden">
+        <button onclick="toggleFinding('${fid}')"
+          class="w-full text-left px-2 py-2 flex items-center gap-2 hover:opacity-80 transition-opacity">
+          <i id="${fid}-icon" class="fas fa-chevron-right text-xs flex-shrink-0" style="color:${chevronColor};transition:transform 0.2s;"></i>
+          <span class="font-medium text-gray-700 flex-1">${titleContent}</span>
+        </button>
+        <div id="${fid}" class="hidden px-3 pb-2 text-gray-500 border-t border-black border-opacity-5">
+          ${detailContent}
+        </div>
+      </div>`;
+  }).join('');
+
+  const isScrollable = phase === 'deps';
+  const findingsBody = isScrollable
+    ? `<div class="overflow-y-auto pr-1" style="max-height:400px;">${findingsHTML}</div>`
+    : findingsHTML;
+
+  const collapseId = `findings-${phase}`;
+
+  const card = document.createElement('div');
+  card.id = `dim-${phase}`;
+  card.className = `card p-5 slide-in${fullWidth ? ' md:col-span-2' : ''}`;
+  card.innerHTML = `
+    <div class="flex items-start justify-between mb-3">
+      <div>
+        <div class="font-semibold text-gray-800 text-sm">${escHtml(name)}</div>
+        <div class="text-xs text-gray-400 mt-0.5">${escHtml(data.summary || '')}</div>
+      </div>
+      <div class="flex items-center gap-2 flex-shrink-0 ml-2">
+        <div class="relative w-12 h-12">
+          <svg class="w-full h-full" viewBox="0 0 48 48">
+            <circle cx="24" cy="24" r="20" fill="none" stroke="#e5e7eb" stroke-width="5"/>
+            <circle cx="24" cy="24" r="20" fill="none" stroke="${color}" stroke-width="5"
+              stroke-linecap="round"
+              stroke-dasharray="${2*Math.PI*20}"
+              stroke-dashoffset="${2*Math.PI*20 - (score/100)*2*Math.PI*20}"
+              style="transform: rotate(-90deg); transform-origin: center;"/>
+          </svg>
+          <div class="absolute inset-0 flex items-center justify-center text-xs font-bold text-gray-700">${score}</div>
+        </div>
+        <span class="px-2 py-1 rounded-full text-xs font-semibold badge-${risk}">${risk} RISK</span>
+      </div>
+    </div>
+    ${findings.length > 0 ? `
+      <div>
+        <button onclick="toggleFindings('${collapseId}')"
+          class="text-xs text-indigo-600 hover:underline mb-2 flex items-center gap-1">
+          <i class="fas fa-chevron-up" id="${collapseId}-icon"></i>
+          ${findings.length} finding(s) (click to collapse)
+        </button>
+        <div id="${collapseId}">
+          ${findingsBody}
+        </div>
+      </div>
+    ` : '<div class="text-xs text-gray-400">No findings</div>'}
+  `;
+
+  // Insert card in defined order
+  const grid = document.getElementById('dimensionGrid');
+  const order = PHASE_ORDER;
+  const myIndex = order.indexOf(phase);
+  let inserted = false;
+  const cards = grid.querySelectorAll('[id^="dim-"]');
+  for (const existing of cards) {
+    const existingPhase = existing.id.replace('dim-', '');
+    if (order.indexOf(existingPhase) > myIndex) {
+      grid.insertBefore(card, existing);
+      inserted = true;
+      break;
+    }
+  }
+  if (!inserted) grid.appendChild(card);
+}
+
+function toggleFinding(id) {
+  const el   = document.getElementById(id);
+  const icon = document.getElementById(`${id}-icon`);
+  if (!el) return;
+  const isOpen = !el.classList.contains('hidden');
+  if (isOpen) {
+    el.classList.add('hidden');
+    icon.style.transform = 'rotate(0deg)';
+  } else {
+    el.classList.remove('hidden');
+    icon.style.transform = 'rotate(90deg)';
+  }
+}
+
+function toggleFindings(id) {
+  const el = document.getElementById(id);
+  const icon = document.getElementById(`${id}-icon`);
+  if (el.classList.contains('hidden')) {
+    el.classList.remove('hidden');
+    icon.className = 'fas fa-chevron-up';
+    icon.closest('button').childNodes[icon.closest('button').childNodes.length - 1].textContent = ' click to collapse';
+  } else {
+    el.classList.add('hidden');
+    icon.className = 'fas fa-chevron-down';
+    icon.closest('button').childNodes[icon.closest('button').childNodes.length - 1].textContent = ' click to expand';
+  }
+}
+
+function showError(msg) {
+  document.getElementById('errorMsg').textContent = msg;
+  document.getElementById('errorSection').classList.remove('hidden');
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/`([^`]+)`/g,'<code class="bg-gray-100 px-1 rounded text-xs">$1</code>')
+    .replace(/\_(.*?)\_/g,'<em>$1</em>');
+}
+
+function exportJSON() {
+  const report = {
+    target: currentTarget,
+    timestamp: new Date().toISOString(),
+    results: allResults,
+  };
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `ai-risk-report-${currentTarget.replace('/','_')}.json`;
+  a.click();
+}
+
+// Allow Enter key to submit
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('urlInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') startAnalysis();
+  });
+  // Check if a default token is configured
+  fetch('/api/config').then(r => r.json()).then(cfg => {
+    if (cfg.has_default_token) {
+      document.getElementById('defaultTokenBadge').classList.remove('hidden');
+    }
+  }).catch(() => {});
+});
+</script>
+</body>
+</html>
