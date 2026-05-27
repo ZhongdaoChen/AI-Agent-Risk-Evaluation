@@ -117,6 +117,36 @@
 
     <div class="flex justify-center gap-3 mt-4 text-sm text-indigo-300 flex-wrap">
 
+      <span class="dim-tag">🤖 Agent能力分析
+        <div class="dim-tooltip">
+          <div class="tt-title">🤖 Agent 能力分析（权重 25%）</div>
+          <div class="tt-desc">枚举这个 AI Agent 能做什么（爆炸半径），而非找代码漏洞。由 LLM 语义分析。</div>
+          <ul class="tt-items">
+            <li>终端/Shell 执行：−25分（最高风险）</li>
+            <li>代码解释器/REPL：−22分</li>
+            <li>文件系统写入/删除：−18分</li>
+            <li>数据库写入：−18分</li>
+            <li>云服务/邮件/外部 API 等</li>
+          </ul>
+          <div class="tt-weight">高分(75+)=低影响能力；低分(&lt;35)=几乎可完全控制宿主系统</div>
+        </div>
+      </span>
+
+      <span class="dim-tag">🛡️ AI安全护栏
+        <div class="dim-tooltip">
+          <div class="tt-title">🛡️ AI 安全护栏（权重 20%）</div>
+          <div class="tt-desc">评估是否有有效的安全控制机制防止 Agent 失控或被滥用。基准 40 分（保守）。</div>
+          <ul class="tt-items">
+            <li>人工审批/确认循环：+15分</li>
+            <li>步骤/轮次上限：+15分</li>
+            <li>工具白名单/权限系统：+10分</li>
+            <li>Prompt Injection 防御：+8分</li>
+            <li>exec/eval 执行 LLM 输出：−25分</li>
+          </ul>
+          <div class="tt-weight">用户输入直接注入 System Prompt −15分；完全无安全机制 −15分</div>
+        </div>
+      </span>
+
       <span class="dim-tag">⭐ 声誉
         <div class="dim-tooltip">
           <div class="tt-title">⭐ 声誉与活跃度（权重 15%）</div>
@@ -146,21 +176,6 @@
         </div>
       </span>
 
-      <span class="dim-tag">🤖 能力分析
-        <div class="dim-tooltip">
-          <div class="tt-title">🤖 Agent 能力分析（权重 25%）</div>
-          <div class="tt-desc">枚举这个 AI Agent 能做什么（爆炸半径），而非找代码漏洞。由 LLM 语义分析。</div>
-          <ul class="tt-items">
-            <li>终端/Shell 执行：−25分（最高风险）</li>
-            <li>代码解释器/REPL：−22分</li>
-            <li>文件系统写入/删除：−18分</li>
-            <li>数据库写入：−18分</li>
-            <li>云服务/邮件/外部 API 等</li>
-          </ul>
-          <div class="tt-weight">高分(75+)=低影响能力；低分(&lt;35)=几乎可完全控制宿主系统</div>
-        </div>
-      </span>
-
       <span class="dim-tag">📦 依赖漏洞
         <div class="dim-tooltip">
           <div class="tt-title">📦 依赖漏洞扫描（权重 15%）</div>
@@ -172,21 +187,6 @@
             <li>支持 Python / Node.js / Go / Rust</li>
           </ul>
           <div class="tt-weight">有 CRITICAL 漏洞时强烈建议暂停使用直至修复</div>
-        </div>
-      </span>
-
-      <span class="dim-tag">🛡️ AI安全
-        <div class="dim-tooltip">
-          <div class="tt-title">🛡️ AI 安全护栏（权重 20%）</div>
-          <div class="tt-desc">评估是否有有效的安全控制机制防止 Agent 失控或被滥用。基准 40 分（保守）。</div>
-          <ul class="tt-items">
-            <li>人工审批/确认循环：+15分</li>
-            <li>步骤/轮次上限：+15分</li>
-            <li>工具白名单/权限系统：+10分</li>
-            <li>Prompt Injection 防御：+8分</li>
-            <li>exec/eval 执行 LLM 输出：−25分</li>
-          </ul>
-          <div class="tt-weight">用户输入直接注入 System Prompt −15分；完全无安全机制 −15分</div>
         </div>
       </span>
 
@@ -375,6 +375,7 @@
 <div class="text-center py-8 text-xs text-gray-400">
   Data sources: GitHub API · <a href="https://securityscorecards.dev" class="hover:text-indigo-500">OpenSSF Scorecard</a> ·
   <a href="https://osv.dev" class="hover:text-indigo-500">OSV.dev</a> · For security assessment reference only
+  <div class="mt-2">Designed and Developed by adidas AppSec · Peter Chen</div>
 </div>
 
 <script>
