@@ -8,6 +8,7 @@ import json
 import os
 import httpx
 from typing import List
+from analyzers.utils import smart_truncate, boost_imports, ENTRY_NAMES
 
 SYSTEM_PROMPT = """You are an AI security expert specializing in AI agent safety controls and guardrails.
 
@@ -144,6 +145,16 @@ class AISafetyAnalyzer:
                         candidates = [name] + [f for f in candidates if f.lower() != name.lower()]
                         break
 
+            # 3b. Import tracking: fetch entry files and boost their imports
+            entry_contents: dict = {}
+            for path in all_files:
+                if path.split("/")[-1] in ENTRY_NAMES:
+                    c = await self._fetch_file(client, path, default_branch)
+                    if c:
+                        entry_contents[path] = c
+            if entry_contents:
+                candidates = boost_imports(entry_contents, all_files, candidates, STAGE1_MAX_CANDIDATES)
+
             # 4. Stage 1: fetch 50-line previews of all candidates
             previews: dict = {}
             for path in candidates:
@@ -157,14 +168,13 @@ class AISafetyAnalyzer:
             # 5. Stage 1: cheap LLM selects top 15 files
             selected_paths = await self._stage1_rank_files(previews, readme_path)
 
-            # 6. Stage 2: fetch full content (550 lines) of selected files
+            # 6. Stage 2: fetch + smart-truncate selected files
             file_contents: List[tuple] = []
             for path in selected_paths:
                 content = await self._fetch_file(client, path, default_branch)
                 if content:
-                    lines = content.splitlines()[:MAX_LINES_PER_FILE]
-                    numbered = "\n".join(f"{i+1:4d} | {ln}" for i, ln in enumerate(lines))
-                    file_contents.append((path, numbered))
+                    truncated = smart_truncate(content, MAX_LINES_PER_FILE, mode="safety")
+                    file_contents.append((path, truncated))
 
         # 7. Build combined prompt
         sections = []

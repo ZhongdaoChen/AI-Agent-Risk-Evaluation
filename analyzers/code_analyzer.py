@@ -9,6 +9,7 @@ import json
 import os
 import re
 from typing import List, Dict
+from analyzers.utils import smart_truncate, boost_imports, ENTRY_NAMES
 
 def _esc(s: str) -> str:
     return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
@@ -136,6 +137,16 @@ class CodeAnalyzer:
                     candidates = [name] + [f for f in candidates if f.lower() != name.lower()]
                     break
 
+            # ── Import tracking: fetch entry files and boost their imports ────
+            entry_contents: Dict[str, str] = {}
+            for path in all_files:
+                if path.split("/")[-1] in ENTRY_NAMES:
+                    c = await self._fetch_file(gh, path, default_branch)
+                    if c:
+                        entry_contents[path] = c
+            if entry_contents:
+                candidates = boost_imports(entry_contents, all_files, candidates, self.STAGE1_MAX_CANDIDATES)
+
             # ── Stage 1: fetch 50-line previews of all candidates ─────────────
             previews: Dict[str, str] = {}
             for path in candidates:
@@ -150,19 +161,18 @@ class CodeAnalyzer:
 
             selected_paths = await self._stage1_rank_files(previews, readme_path)
 
-            # ── Stage 2: fetch full content (600 lines) of selected files ─────
+            # ── Stage 2: fetch + smart-truncate selected files ───────────────
             file_contents: Dict[str, str] = {}
             for path in selected_paths:
                 content = await self._fetch_file(gh, path, default_branch)
                 if content:
                     file_contents[path] = content
 
-        # Build combined source for deep LLM call
+        # Build combined source for deep LLM call (smart truncation)
         sections = []
         for path, content in file_contents.items():
-            lines = content.splitlines()[:self.MAX_LINES_PER_FILE]
-            numbered = "\n".join(f"{i+1:4d} | {l}" for i, l in enumerate(lines))
-            sections.append(f"=== FILE: {path} ===\n{numbered}")
+            truncated = smart_truncate(content, self.MAX_LINES_PER_FILE, mode="capability")
+            sections.append(f"=== FILE: {path} ===\n{truncated}")
         combined = "\n\n".join(sections)
 
         raw_caps, summary = await self._call_llm(combined)
