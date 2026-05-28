@@ -236,6 +236,32 @@
       </span>
 
     </div>
+
+    <!-- About / Scope Panel (inside gradient banner) -->
+    <div class="max-w-3xl mx-auto mt-6">
+      <div class="rounded-xl overflow-hidden" style="background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12);">
+        <button onclick="toggleAbout()" class="w-full flex items-center justify-between px-5 py-3 text-left">
+          <span class="text-sm font-semibold text-indigo-200 flex items-center gap-2">
+            ⚠️ 能力边界说明：本工具仅做静态代码分析，以下运行时行为无法发现：
+          </span>
+          <i id="aboutChevron" class="fas fa-chevron-up text-indigo-400 text-xs transition-transform"></i>
+        </button>
+        <div id="aboutBody" class="px-5 pb-5 text-xs space-y-4">
+          <div>
+            <ul class="space-y-1.5 text-indigo-300">
+              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span>System Prompt 从远程 URL 动态加载的内容</li>
+              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span>工具调用链在运行时动态组合的行为</li>
+              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span>MCP Server 连接后实际获得的权限</li>
+              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span>Agent 运行时的真实行为与副作用</li>
+            </ul>
+          </div>
+          <div class="pt-2 border-t text-indigo-500" style="border-color: rgba(255,255,255,0.1);">
+            结果供参考，不构成最终安全结论，请联系 Security 进行进一步审核，感谢！
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -730,6 +756,13 @@ document.addEventListener('DOMContentLoaded', () => {
     tip.addEventListener('mouseleave', scheduleHide);
   });
 });
+
+function toggleAbout() {
+  const body = document.getElementById('aboutBody');
+  const chv  = document.getElementById('aboutChevron');
+  const collapsed = body.classList.toggle('hidden');
+  chv.style.transform = collapsed ? 'rotate(180deg)' : '';
+}
 
 // ── Security Controls ──────────────────────────────────────────────
 async function fetchSecurityControls(overall) {
