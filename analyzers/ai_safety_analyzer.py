@@ -89,7 +89,11 @@ DELTA_BOUNDS = {
     "CRITICAL": (-30, -12),
 }
 
-MAX_LINES_PER_FILE = 350
+MAX_LINES_PER_FILE    = 550   # stage 2 deep scan (up from 350)
+STAGE1_PREVIEW_LINES  = 50
+STAGE1_MAX_CANDIDATES = 40
+STAGE2_MAX_FILES      = 15
+QWEN_TURBO_MODEL      = "qwen-turbo"
 
 
 class AISafetyAnalyzer:
@@ -127,9 +131,9 @@ class AISafetyAnalyzer:
                 return self._error_result("无法获取代码树")
 
             all_files = [f["path"] for f in tree_r.json().get("tree", []) if f.get("type") == "blob"]
-            scan_files = self._select_files(all_files)
+            candidates = self._select_files(all_files)  # up to 40 candidates
 
-            # 3. Fetch README
+            # 3. Fetch README (always include)
             readme_path = ""
             readme_content = ""
             for name in ["README.md", "readme.md", "README.rst", "README.txt"]:
@@ -137,31 +141,46 @@ class AISafetyAnalyzer:
                     readme_path = name
                     readme_content = await self._fetch_file(client, name, default_branch)
                     if readme_content:
+                        candidates = [name] + [f for f in candidates if f.lower() != name.lower()]
                         break
 
-            # 4. Fetch source files
-            file_contents: List[tuple] = []  # (path, content)
-            for path in scan_files:
+            # 4. Stage 1: fetch 50-line previews of all candidates
+            previews: dict = {}
+            for path in candidates:
+                content = await self._fetch_file(client, path, default_branch)
+                if content:
+                    previews[path] = "\n".join(content.splitlines()[:STAGE1_PREVIEW_LINES])
+
+            if not self.qwen_key:
+                return self._error_result("QWEN_API_KEY not configured")
+
+            # 5. Stage 1: cheap LLM selects top 15 files
+            selected_paths = await self._stage1_rank_files(previews, readme_path)
+
+            # 6. Stage 2: fetch full content (550 lines) of selected files
+            file_contents: List[tuple] = []
+            for path in selected_paths:
                 content = await self._fetch_file(client, path, default_branch)
                 if content:
                     lines = content.splitlines()[:MAX_LINES_PER_FILE]
                     numbered = "\n".join(f"{i+1:4d} | {ln}" for i, ln in enumerate(lines))
                     file_contents.append((path, numbered))
 
-        # 5. Build combined prompt
+        # 7. Build combined prompt
         sections = []
         if readme_content:
             readme_excerpt = "\n".join(readme_content.splitlines()[:200])
             sections.append(f"=== FILE: {readme_path} ===\n{readme_excerpt}")
         for path, numbered in file_contents:
-            sections.append(f"=== FILE: {path} ===\n{numbered}")
+            if path != readme_path:
+                sections.append(f"=== FILE: {path} ===\n{numbered}")
 
         if not sections:
             return self._error_result("无法从该仓库获取文件")
 
         combined = "\n\n".join(sections)
 
-        # 6. Call LLM
+        # 8. Call deep LLM
         llm_findings = await self._call_llm(combined)
 
         # 7. Build result
@@ -171,6 +190,65 @@ class AISafetyAnalyzer:
             len(file_contents),
             readme_path,
         )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Stage 1: file ranker (qwen-turbo)
+    # ─────────────────────────────────────────────────────────────────────────
+    async def _stage1_rank_files(self, previews: dict, readme_path: str) -> list:
+        """Use cheap model to select the most safety-relevant files for deep scan."""
+        preview_text = ""
+        for path, snippet in previews.items():
+            preview_text += f"\n--- {path} ---\n{snippet}\n"
+
+        prompt = f"""你是一个代码文件相关性排序器。
+
+任务：从下列候选文件的预览中，选出最适合用来分析「AI Agent 安全护栏」的 {STAGE2_MAX_FILES} 个文件。
+
+优先选择：
+- 包含 human approval / confirmation / dry_run / safety check 逻辑的文件
+- 包含工具调用白名单、步骤限制、速率限制的文件
+- Agent 主流程文件（main.py、agent.py、runner.py 等）
+- README（如果有系统提示词或安全说明）
+- 包含 prompt / system_prompt / instructions 的文件
+
+排除：测试文件、纯配置文件、空文件、无实质代码的文档。
+
+候选文件预览：
+{preview_text}
+
+以 JSON 格式返回，只包含文件路径列表：
+{{"selected_files": ["path1", "path2", ...]}}"""
+
+        payload = {
+            "model": QWEN_TURBO_MODEL,
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": "你是代码文件相关性排序专家，输出严格的 JSON。"},
+                {"role": "user",   "content": prompt},
+            ],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(
+                    f"{self.QWEN_BASE}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.qwen_key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+                r.raise_for_status()
+                data = json.loads(r.json()["choices"][0]["message"]["content"])
+                selected = data.get("selected_files", [])
+                valid = [p for p in selected if p in previews]
+                # Pad if LLM returned too few
+                if len(valid) < STAGE2_MAX_FILES:
+                    for p in previews:
+                        if p not in valid:
+                            valid.append(p)
+                        if len(valid) >= STAGE2_MAX_FILES:
+                            break
+                return valid[:STAGE2_MAX_FILES]
+        except Exception:
+            return list(previews.keys())[:STAGE2_MAX_FILES]
 
     # ─────────────────────────────────────────────────────────────────────────
     # LLM call
@@ -376,7 +454,7 @@ class AISafetyAnalyzer:
                 priority.append(f)
             elif ext in src_ext and len(parts) <= 3:
                 secondary.append(f)
-        return (priority + secondary)[:12]
+        return (priority + secondary)[:STAGE1_MAX_CANDIDATES]
 
     def _make_file_link(self, filepath: str, line_no, branch: str) -> str:
         if not filepath:

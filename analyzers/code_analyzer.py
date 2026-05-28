@@ -92,8 +92,12 @@ RULES:
 class CodeAnalyzer:
     GITHUB_BASE = "https://api.github.com"
     QWEN_BASE   = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    QWEN_MODEL  = "qwen-plus"
-    MAX_LINES_PER_FILE = 400
+    QWEN_MODEL        = "qwen-plus"
+    QWEN_TURBO_MODEL  = "qwen-turbo"
+    STAGE1_PREVIEW_LINES  = 50    # lines read per file in stage 1
+    STAGE1_MAX_CANDIDATES = 40    # candidate files sent to stage 1 ranker
+    STAGE2_MAX_FILES      = 15    # files selected for deep analysis
+    MAX_LINES_PER_FILE    = 600   # deep scan lines in stage 2 (up from 400)
 
     def __init__(self, owner: str, repo: str, token: str = None):
         self.owner = owner
@@ -122,24 +126,38 @@ class CodeAnalyzer:
                 return self._error_result("Cannot fetch repository tree")
 
             all_files = [f["path"] for f in tree_r.json().get("tree", []) if f.get("type") == "blob"]
-            scan_files = self._select_files(all_files)
+            candidates = self._select_files(all_files)  # up to 40 candidates
 
-            # Also grab README for tool documentation
+            # Always include README
+            readme_path = None
             for name in ["README.md", "readme.md"]:
                 if any(f.lower() == name.lower() for f in all_files):
-                    scan_files = [name] + [f for f in scan_files if f.lower() != name.lower()]
+                    readme_path = name
+                    candidates = [name] + [f for f in candidates if f.lower() != name.lower()]
                     break
 
+            # ── Stage 1: fetch 50-line previews of all candidates ─────────────
+            previews: Dict[str, str] = {}
+            for path in candidates:
+                content = await self._fetch_file(gh, path, default_branch)
+                if content:
+                    snippet = "\n".join(content.splitlines()[:self.STAGE1_PREVIEW_LINES])
+                    previews[path] = snippet
+
+            # ── Stage 1: cheap LLM selects top 15 files ──────────────────────
+            if not self.qwen_key:
+                return self._error_result("QWEN_API_KEY not configured")
+
+            selected_paths = await self._stage1_rank_files(previews, readme_path)
+
+            # ── Stage 2: fetch full content (600 lines) of selected files ─────
             file_contents: Dict[str, str] = {}
-            for path in scan_files[:15]:
+            for path in selected_paths:
                 content = await self._fetch_file(gh, path, default_branch)
                 if content:
                     file_contents[path] = content
 
-        if not self.qwen_key:
-            return self._error_result("QWEN_API_KEY not configured")
-
-        # Build combined source for single LLM call
+        # Build combined source for deep LLM call
         sections = []
         for path, content in file_contents.items():
             lines = content.splitlines()[:self.MAX_LINES_PER_FILE]
@@ -150,6 +168,65 @@ class CodeAnalyzer:
         raw_caps, summary = await self._call_llm(combined)
 
         return self._build_result(raw_caps, summary, default_branch, len(file_contents))
+
+    # ── Stage 1: file ranker (qwen-turbo) ────────────────────────────────────
+
+    async def _stage1_rank_files(self, previews: Dict[str, str], readme_path: str) -> List[str]:
+        """Use cheap model to rank candidate files and return top STAGE2_MAX_FILES paths."""
+        preview_text = ""
+        for path, snippet in previews.items():
+            preview_text += f"\n--- {path} ---\n{snippet}\n"
+
+        prompt = f"""你是一个代码文件相关性排序器。
+
+任务：从下列候选文件的预览中，选出最适合用来分析「AI Agent 具备哪些操作能力（爆炸半径）」的 {self.STAGE2_MAX_FILES} 个文件。
+
+优先选择：
+- 定义了工具/tool/skill/action/executor 的文件
+- 包含 shell/bash/file/database/cloud/email/browser 等操作的文件
+- Agent 的主入口文件（main.py、app.py、agent.py 等）
+- README（如果存在）
+
+排除：测试文件、配置文件、文档文件、空文件。
+
+候选文件预览：
+{preview_text}
+
+以 JSON 格式返回，只包含文件路径列表：
+{{"selected_files": ["path1", "path2", ...]}}"""
+
+        payload = {
+            "model": self.QWEN_TURBO_MODEL,
+            "temperature": 0.0,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": "你是代码文件相关性排序专家，输出严格的 JSON。"},
+                {"role": "user",   "content": prompt},
+            ],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(
+                    f"{self.QWEN_BASE}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.qwen_key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+                r.raise_for_status()
+                data = json.loads(r.json()["choices"][0]["message"]["content"])
+                selected = data.get("selected_files", [])
+                # Validate: only return paths that exist in previews
+                valid = [p for p in selected if p in previews]
+                # Fallback: if LLM returns too few, pad with remaining candidates
+                if len(valid) < self.STAGE2_MAX_FILES:
+                    for p in previews:
+                        if p not in valid:
+                            valid.append(p)
+                        if len(valid) >= self.STAGE2_MAX_FILES:
+                            break
+                return valid[:self.STAGE2_MAX_FILES]
+        except Exception:
+            # Fallback to original keyword-based selection
+            return list(previews.keys())[:self.STAGE2_MAX_FILES]
 
     # ── LLM call ──────────────────────────────────────────────────────────────
 
@@ -342,7 +419,7 @@ class CodeAnalyzer:
             ext  = ("." + name.split(".")[-1]) if "." in name else ""
             if ext in src_ext and any(k in f.lower() for k in kw): priority.append(f)
             elif ext in src_ext and len(parts) <= 3:                secondary.append(f)
-        return (priority + secondary)[:15]
+        return (priority + secondary)[:self.STAGE1_MAX_CANDIDATES]
 
     def _make_file_link(self, filepath: str, line_no, branch: str) -> str:
         if not filepath:
