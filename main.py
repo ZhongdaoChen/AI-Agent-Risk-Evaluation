@@ -31,6 +31,7 @@ from analyzers.ai_safety_analyzer import AISafetyAnalyzer
 from analyzers.privacy_analyzer import PrivacyAnalyzer
 from analyzers.supply_chain_analyzer import SupplyChainAnalyzer
 from analyzers.runtime_analyzer import RuntimeAnalyzer
+from translations import translate_result
 
 app = FastAPI(title="AI Agent Risk Evaluator", version="1.0.0")
 
@@ -99,7 +100,7 @@ def calculate_overall(results: dict) -> dict:
     return {"score": final, "risk_level": risk, "emoji": emoji, "label": label}
 
 
-async def stream_analysis(url: str, token: Optional[str]) -> AsyncGenerator[str, None]:
+async def stream_analysis(url: str, token: Optional[str], lang: str = "zh") -> AsyncGenerator[str, None]:
     def sse(data: dict) -> str:
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -114,13 +115,16 @@ async def stream_analysis(url: str, token: Optional[str]) -> AsyncGenerator[str,
     analyzers = [
         ("github",        "⭐ Reputation & Activity",            GitHubAnalyzer(owner, repo, token)),
         ("depsdev",       "🌐 deps.dev Package Health",          DepsDotDevAnalyzer(owner, repo, token)),
-        ("code",          "🤖 Agent Capability Analysis",            CodeAnalyzer(owner, repo, token)),
+        ("code",          "🤖 Agent Capability Analysis",            CodeAnalyzer(owner, repo, token, lang=lang)),
         ("deps",          "📦 Dependency Vulnerability Scan",    DepsAnalyzer(owner, repo, token)),
-        ("ai_safety",     "🛡️ AI Safety Guardrails",             AISafetyAnalyzer(owner, repo, token)),
+        ("ai_safety",     "🛡️ AI Safety Guardrails",             AISafetyAnalyzer(owner, repo, token, lang=lang)),
         ("privacy",       "🔒 Data Privacy",                     PrivacyAnalyzer(owner, repo, token)),
         ("supply_chain",  "⛓️ Supply Chain Integrity",           SupplyChainAnalyzer(owner, repo, token)),
         ("runtime",       "🐳 Runtime Isolation",                RuntimeAnalyzer(owner, repo, token)),
     ]
+
+    # Non-LLM analyzers that need translation
+    NON_LLM = {"github", "depsdev", "deps", "privacy", "supply_chain", "runtime"}
 
     results = {}
 
@@ -130,21 +134,27 @@ async def stream_analysis(url: str, token: Optional[str]) -> AsyncGenerator[str,
             result = await analyzer.analyze()
         except asyncio.CancelledError:
             # CancelledError is BaseException in Python 3.8+ — must catch explicitly
+            cancelled_msg = "Analysis cancelled (asyncio timeout/cancel)" if lang == "en" else "分析被取消 (asyncio timeout/cancel)"
+            timeout_title = "Analysis timed out" if lang == "en" else "分析超时"
             result = {
                 "score": 50,
                 "risk_level": "UNKNOWN",
-                "summary": "分析被取消 (asyncio timeout/cancel)",
-                "findings": [{"type": "INFO", "title": "分析超时", "detail": f"{key} analyzer was cancelled"}],
+                "summary": cancelled_msg,
+                "findings": [{"type": "INFO", "title": timeout_title, "detail": f"{key} analyzer was cancelled"}],
                 "metrics": {},
             }
         except Exception as e:
+            failed_msg = f"Analysis failed: {str(e)[:120]}" if lang == "en" else f"分析失败: {str(e)[:120]}"
+            error_title = "Analysis error" if lang == "en" else "分析出错"
             result = {
                 "score": 50,
                 "risk_level": "UNKNOWN",
-                "summary": f"分析失败: {str(e)[:120]}",
-                "findings": [{"type": "INFO", "title": "分析出错", "detail": str(e)[:200]}],
+                "summary": failed_msg,
+                "findings": [{"type": "INFO", "title": error_title, "detail": str(e)[:200]}],
                 "metrics": {},
             }
+        if key in NON_LLM:
+            result = translate_result(result, lang)
         results[key] = result
         yield sse({"type": "result", "phase": key, "name": name, "data": result})
         await asyncio.sleep(0.05)
@@ -169,10 +179,11 @@ async def config():
 async def analyze(
     url: str = Query(..., description="GitHub repository URL"),
     token: Optional[str] = Query(None, description="GitHub PAT (optional, increases rate limit)"),
+    lang: str = Query("zh", description="Output language: 'zh' (default) or 'en'"),
 ):
     effective_token = token or DEFAULT_TOKEN or None
     return StreamingResponse(
-        stream_analysis(url, effective_token),
+        stream_analysis(url, effective_token, lang=lang),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -191,43 +202,85 @@ class ControlsRequest(BaseModel):
     code_result: dict = {}
     ai_safety_result: dict = {}
     runtime_result: dict = {}
-    privacy_result: dict = {}
-    supply_chain_result: dict = {}
+    lang: str = "zh"
 
 
 def _build_controls_prompt(req: ControlsRequest) -> str:
-    def fmt_findings(result: dict, max_items: int = 10) -> str:
+    def fmt_findings(result: dict, max_items: int = 15) -> str:
         findings = result.get("findings", [])
         lines = []
         for f in findings[:max_items]:
-            if f.get("type") in ("INFO",):
+            if f.get("type") == "INFO":
                 continue
-            lines.append(f"  [{f.get('type','?')}] {f.get('title','')}：{f.get('detail','')[:120]}")
-        return "\n".join(lines) if lines else "  无特殊发现"
+            lines.append(f"  [{f.get('type','?')}] {f.get('title','')}：{f.get('detail','')[:150]}")
+        return "\n".join(lines) if lines else ("  No findings" if req.lang == "en" else "  无特殊发现")
 
-    cap_summary   = req.code_result.get("summary", "未获取")
-    safety_summary = req.ai_safety_result.get("summary", "未获取")
-
+    cap_summary    = req.code_result.get("summary", "N/A")
+    safety_summary = req.ai_safety_result.get("summary", "N/A")
     cap_findings    = fmt_findings(req.code_result)
     safety_findings = fmt_findings(req.ai_safety_result)
     runtime_findings = fmt_findings(req.runtime_result)
-    privacy_findings = fmt_findings(req.privacy_result)
-    sc_findings      = fmt_findings(req.supply_chain_result)
+
+    if req.lang == "en":
+        return f"""You are a senior AI security advisor at the adidas AppSec team.
+
+Below are the security assessment results for the open-source AI Agent: "{req.repo}"
+
+== Overall Risk ==
+Risk Level: {req.overall.get('risk_level')} | Score: {req.overall.get('score')} / 100
+
+== Agent Capabilities (Blast Radius) ==
+{cap_summary}
+Detected capabilities:
+{cap_findings}
+
+== AI Safety Guardrails (what exists / what's missing) ==
+{safety_summary}
+Findings:
+{safety_findings}
+
+== Runtime Isolation ==
+{runtime_findings}
+
+---
+
+Based on the above, generate actionable security control recommendations for teams deploying this Agent internally.
+
+【Threat Model】
+- Users are normal employees — not attackers. Risk comes from the Agent hallucinating, misjudging scope, or exceeding expected boundaries.
+- Goal: constrain each detected capability to its intended scope; ensure no single action is irreversible without human awareness.
+
+【Output Requirements】
+Generate recommendations across exactly these 3 categories:
+
+1. **Capability Boundary Controls** — For each HIGH/MEDIUM capability detected, provide a specific control that restricts it to expected scope. Example: "Agent has shell execution → restrict to a whitelist of allowed commands, block destructive flags".
+
+2. **Guardrail Configuration** — For each POSITIVE guardrail already present, explain how to properly configure it for production. For example: if human approval exists, specify which capability categories must trigger it.
+
+3. **Missing Guardrails** — For each dangerous capability that lacks a corresponding guardrail (no step limit, no approval, no allowlist), specify exactly what to add and how to implement it.
+
+4. **Ops & Deployment** — Infrastructure-level controls: container hardening, IAM least-privilege, network egress restrictions, resource quotas tied to detected capabilities.
+
+Rules:
+- Every recommendation must reference a specific detected capability or guardrail finding ("Because this agent has X / lacks Y...")
+- Each item must include: title (≤8 words), reason (why, what could go wrong), implementation (≥3 concrete steps with examples), priority (MUST/RECOMMEND/OPTIONAL), category
+- At least 3 items per category; total ≥ 12
+- Output in English
+- Return valid JSON: {{"controls": [{{"category": "Capability Boundary Controls", "title": "...", "reason": "...", "implementation": "...", "priority": "MUST"}}]}}"""
 
     return f"""你是 adidas AppSec 团队的高级 AI 安全顾问。
 
-以下是对开源 AI Agent 仓库「{req.repo}」的安全评估结果：
+以下是开源 AI Agent「{req.repo}」的安全评估结果：
 
 == 总体风险 ==
-风险等级：{req.overall.get('risk_level')} RISK
-综合评分：{req.overall.get('score')} / 100
+风险等级：{req.overall.get('risk_level')} | 综合评分：{req.overall.get('score')} / 100
 
 == Agent 能力分析（爆炸半径）==
 {cap_summary}
-发现项：
+检测到的能力：
 {cap_findings}
 
-== AI 安全护栏 ==
+== AI 安全护栏（已有 / 缺失）==
 {safety_summary}
 发现项：
 {safety_findings}
@@ -235,42 +288,31 @@ def _build_controls_prompt(req: ControlsRequest) -> str:
 == 运行时隔离 ==
 {runtime_findings}
 
-== 数据隐私 ==
-{privacy_findings}
-
-== 供应链完整性 ==
-{sc_findings}
-
 ---
 
-请基于以上评估结果，为企业内部计划部署此 Agent 的开发与运维团队，生成**详尽、可操作**的安全管控建议。
+请基于以上结果，为内部部署此 Agent 的团队生成安全管控建议。
 
-【重要前提】本场景的威胁模型是：
-- Agent 的使用者是**正常员工或业务用户，不会主动尝试攻击或绕过系统**
-- 风险来源是：AI Agent 自身的幻觉、误判、能力边界不清，导致用户**在毫不知情的情况下**触发了超出预期的操作
-- 典型场景：用户让 Agent 帮忙整理文件，Agent 误删了不该删的内容；用户让 Agent 发邮件，Agent 发给了错误的收件人；Agent 调用了用户未预期的云 API
-- 管控目标：**为 Agent 的每一类能力设置合理的边界和兜底机制，防止意外造成不可逆影响**
-- 不需要考虑主动攻击、渗透测试、恶意提示注入等对抗性场景
+【威胁模型】
+- 使用者是正常员工，不是攻击者。风险来自 Agent 幻觉、误判、超出预期的能力边界。
+- 目标：将每类检测到的能力限制在预期范围内；确保没有单次操作在用户不知情的情况下造成不可逆影响。
 
-要求：
-1. 覆盖以下四个维度（每个维度至少 2-3 条，总计不少于 10 条）：
-   - 调用方代码（开发者在集成代码中实现的边界和兜底）
-   - 运维部署（基础设施层面的能力限制与资源保护）
-   - 监控与审计（感知 Agent 做了什么，发现意外行为）
-   - 数据安全（防止 Agent 误操作导致数据泄露或损坏）
+【输出要求】
+严格按以下 3 个维度生成建议：
 
-2. 每条建议必须包含：
-   - title：简短有力的建议名称（10字以内）
-   - reason：为什么需要，结合该 Agent 具体发现的能力，说明"如果不做，用户在正常使用时可能意外触发什么后果"
-   - implementation：详细的实施步骤，包括伪代码、配置示例或命令，不少于 3 个具体步骤
-   - priority：MUST（该能力存在时必须实施）/ RECOMMEND（强烈建议）/ OPTIONAL（锦上添花）
-   - category：对应维度名称（如"调用方代码"）
+1. **能力边界管控** — 针对每一条检测到的 HIGH/MEDIUM 能力，给出具体的限制措施，将其约束在预期范围内。例如："Agent 具备 Shell 执行能力 → 限制为允许命令白名单，屏蔽破坏性参数"。
 
-3. 建议要针对此 Agent 的具体能力定制，直接说明"因为该 Agent 具备 X 能力，所以需要..."
-4. implementation 字段使用换行分隔步骤，可包含代码块
-5. 全部使用中文输出
-6. 以合法 JSON 格式返回，结构如下：
-{{"controls": [{{"category": "调用方代码", "title": "...", "reason": "...", "implementation": "...", "priority": "MUST"}}]}}"""
+2. **护栏配置建议** — 针对已检测到存在的安全护栏（POSITIVE），说明在生产环境中应如何正确配置。例如：已有人工审批 → 明确哪些能力类别必须触发审批。
+
+3. **缺失护栏补齐** — 针对有高危能力但缺乏对应护栏的情况（无步骤限制、无审批、无白名单），明确需要新增什么，并给出具体实施方式。
+
+4. **运维部署管控** — 基础设施层面：容器加固、IAM 最小权限、网络出口限制、资源配额，结合检测到的能力定制。
+
+规则：
+- 每条建议必须引用具体的能力或护栏发现项（"因为该 Agent 具备 X / 缺少 Y..."）
+- 每条包含：title（8字以内）、reason（为什么，可能触发什么后果）、implementation（≥3步骤，含示例）、priority（MUST/RECOMMEND/OPTIONAL）、category
+- 每个维度至少 3 条，总计不少于 12 条
+- 全部中文输出
+- 返回合法 JSON：{{"controls": [{{"category": "能力边界管控", "title": "...", "reason": "...", "implementation": "...", "priority": "MUST"}}]}}"""
 
 
 @app.post("/api/security-controls")
@@ -280,6 +322,7 @@ async def security_controls(req: ControlsRequest):
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     )
     prompt = _build_controls_prompt(req)
+    sys_prompt = "You are an enterprise AI security advisor. Output strict JSON." if req.lang == "en" else "你是企业 AI 安全顾问，输出严格的 JSON。"
     try:
         resp = await asyncio.wait_for(
             client.chat.completions.create(
@@ -287,7 +330,7 @@ async def security_controls(req: ControlsRequest):
                 temperature=0.3,
                 response_format={"type": "json_object"},
                 messages=[
-                    {"role": "system", "content": "你是企业 AI 安全顾问，输出严格的 JSON。"},
+                    {"role": "system", "content": sys_prompt},
                     {"role": "user",   "content": prompt},
                 ],
             ),
@@ -297,6 +340,7 @@ async def security_controls(req: ControlsRequest):
         data = json.loads(raw)
         return data
     except asyncio.TimeoutError:
-        return {"controls": [], "error": "LLM 响应超时，请稍后重试"}
+        timeout_msg = "LLM response timed out, please try again later" if req.lang == "en" else "LLM 响应超时，请稍后重试"
+        return {"controls": [], "error": timeout_msg}
     except Exception as e:
         return {"controls": [], "error": str(e)[:200]}

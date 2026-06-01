@@ -102,9 +102,10 @@ class AISafetyAnalyzer:
     QWEN_BASE   = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL  = "qwen-plus"
 
-    def __init__(self, owner: str, repo: str, token: str = None):
+    def __init__(self, owner: str, repo: str, token: str = None, lang: str = "zh"):
         self.owner = owner
         self.repo  = repo
+        self.lang  = lang
         self.gh_headers = {
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "AI-Risk-Evaluator/1.0",
@@ -210,7 +211,28 @@ class AISafetyAnalyzer:
         for path, snippet in previews.items():
             preview_text += f"\n--- {path} ---\n{snippet}\n"
 
-        prompt = f"""你是一个代码文件相关性排序器。
+        if self.lang == "en":
+            prompt = f"""You are a code file relevance ranker.
+
+Task: From the candidate file previews below, select the {STAGE2_MAX_FILES} most relevant files for analyzing "AI Agent safety guardrails".
+
+Prioritize:
+- Files containing human approval / confirmation / dry_run / safety check logic
+- Files with tool allowlists, step limits, rate limits
+- Agent main flow files (main.py, agent.py, runner.py, etc.)
+- README (if it has system prompts or safety descriptions)
+- Files containing prompt / system_prompt / instructions
+
+Exclude: test files, pure config files, empty files, documentation without code.
+
+Candidate file previews:
+{preview_text}
+
+Return in JSON format with only the file path list:
+{{"selected_files": ["path1", "path2", ...]}}"""
+            sys_content = "You are a code file relevance ranking expert. Output strict JSON."
+        else:
+            prompt = f"""你是一个代码文件相关性排序器。
 
 任务：从下列候选文件的预览中，选出最适合用来分析「AI Agent 安全护栏」的 {STAGE2_MAX_FILES} 个文件。
 
@@ -228,13 +250,14 @@ class AISafetyAnalyzer:
 
 以 JSON 格式返回，只包含文件路径列表：
 {{"selected_files": ["path1", "path2", ...]}}"""
+            sys_content = "你是代码文件相关性排序专家，输出严格的 JSON。"
 
         payload = {
             "model": QWEN_TURBO_MODEL,
             "temperature": 0.0,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": "你是代码文件相关性排序专家，输出严格的 JSON。"},
+                {"role": "system", "content": sys_content},
                 {"role": "user",   "content": prompt},
             ],
         }
@@ -266,12 +289,18 @@ class AISafetyAnalyzer:
     async def _call_llm(self, combined_source: str) -> list:
         if not self.qwen_key:
             return []
+        sys_prompt = SYSTEM_PROMPT
+        if self.lang == "en":
+            sys_prompt = SYSTEM_PROMPT.replace(
+                "- All text fields (mechanism, description) MUST be written in Chinese (Simplified Chinese). Evidence should keep the original code snippet.",
+                "IMPORTANT: Output ALL text fields (mechanism, description, overall_assessment) in English only. Evidence should keep the original code snippet."
+            )
         payload = {
             "model": self.QWEN_MODEL,
             "temperature": 0.05,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": sys_prompt},
                 {"role": "user",   "content": f"Analyze the following AI agent project files for safety guardrails:\n\n{combined_source}"},
             ],
         }
@@ -287,7 +316,7 @@ class AISafetyAnalyzer:
                 data = json.loads(raw)
                 return data.get("findings", [])
         except Exception as e:
-            return [{"mechanism": f"LLM分析错误：{e}", "type": "LOW",
+            return [{"mechanism": f"LLM analysis error: {e}", "type": "LOW",
                      "description": str(e), "evidence": "", "file": "", "line": None, "score_delta": 0}]
 
     # ─────────────────────────────────────────────────────────────────────────

@@ -10,7 +10,7 @@
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
   body { font-family: 'Inter', sans-serif; }
 
-  .gradient-bg { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%); }
+  .gradient-bg { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%); position: relative; }
 
   .card { background: rgba(255,255,255,0.97); border-radius: 1rem; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
 
@@ -110,15 +110,22 @@
 
 <!-- Header -->
 <div class="gradient-bg py-12 px-4">
+  <!-- Language toggle button -->
+  <div class="absolute top-4 right-4">
+    <button id="langToggle" onclick="toggleLang()"
+      class="text-xs px-3 py-1.5 rounded-full border border-white border-opacity-30 text-white text-opacity-80 hover:bg-white hover:bg-opacity-10 transition-all font-medium">
+      English
+    </button>
+  </div>
   <div class="max-w-4xl mx-auto text-center">
     <div class="flex items-center justify-center gap-3 mb-4">
-      <h1 class="text-3xl font-bold text-white">adidas AppSec AI Agent Risk Assessment Platform</h1>
+      <h1 class="text-3xl font-bold text-white" data-i18n="pageTitle">adidas AppSec AI Agent Risk Assessment Platform</h1>
     </div>
 
     <div class="flex justify-center gap-3 mt-4 text-sm text-indigo-300 flex-wrap">
 
-      <span class="dim-tag">🤖 Agent能力分析
-        <div class="dim-tooltip">
+      <span class="dim-tag" data-dim="code">🤖 <span data-i18n="phaseMeta.code.label">Agent能力分析</span>
+        <div class="dim-tooltip" id="tooltip-code">
           <div class="tt-title">🤖 Agent 能力分析（权重 25%）</div>
           <div class="tt-desc">枚举这个 AI Agent 能做什么（爆炸半径），而非找代码漏洞。由 LLM 语义分析。</div>
           <ul class="tt-items">
@@ -132,8 +139,8 @@
         </div>
       </span>
 
-      <span class="dim-tag">🛡️ AI安全护栏
-        <div class="dim-tooltip">
+      <span class="dim-tag" data-dim="ai_safety">🛡️ <span data-i18n="phaseMeta.ai_safety.label">AI安全护栏</span>
+        <div class="dim-tooltip" id="tooltip-ai_safety">
           <div class="tt-title">🛡️ AI 安全护栏（权重 20%）</div>
           <div class="tt-desc">评估是否有有效的安全控制机制防止 Agent 失控或被滥用。基准 40 分（保守）。</div>
           <ul class="tt-items">
@@ -147,8 +154,8 @@
         </div>
       </span>
 
-      <span class="dim-tag">⭐ 声誉
-        <div class="dim-tooltip">
+      <span class="dim-tag" data-dim="github">⭐ <span data-i18n="phaseMeta.github.label">声誉</span>
+        <div class="dim-tooltip" id="tooltip-github">
           <div class="tt-title">⭐ 声誉与活跃度（权重 15%）</div>
           <div class="tt-desc">通过 GitHub 公开数据判断项目的社区信任度、维护状态和安全成熟度。</div>
           <ul class="tt-items">
@@ -162,8 +169,8 @@
         </div>
       </span>
 
-      <span class="dim-tag">🌐 deps.dev
-        <div class="dim-tooltip">
+      <span class="dim-tag" data-dim="depsdev">🌐 <span data-i18n="phaseMeta.depsdev.label">deps.dev</span>
+        <div class="dim-tooltip" id="tooltip-depsdev">
           <div class="tt-title">🌐 依赖包健康度（权重 5%）</div>
           <div class="tt-desc">通过 deps.dev API 评估项目本身作为包的健康状况，交叉验证依赖许可证和漏洞。</div>
           <ul class="tt-items">
@@ -176,8 +183,8 @@
         </div>
       </span>
 
-      <span class="dim-tag">📦 依赖漏洞
-        <div class="dim-tooltip">
+      <span class="dim-tag" data-dim="deps">📦 <span data-i18n="phaseMeta.deps.label">依赖漏洞</span>
+        <div class="dim-tooltip" id="tooltip-deps">
           <div class="tt-title">📦 依赖漏洞扫描（权重 15%）</div>
           <div class="tt-desc">扫描所有直接依赖的已知 CVE，通过 OSV.dev 数据库查询。</div>
           <ul class="tt-items">
@@ -190,8 +197,8 @@
         </div>
       </span>
 
-      <span class="dim-tag">🔒 隐私
-        <div class="dim-tooltip">
+      <span class="dim-tag" data-dim="privacy">🔒 <span data-i18n="phaseMeta.privacy.label">隐私</span>
+        <div class="dim-tooltip" id="tooltip-privacy">
           <div class="tt-title">🔒 数据隐私（权重 10%）</div>
           <div class="tt-desc">评估是否存在用户数据泄露风险，包括对话内容被记录、PII 处理不当等。</div>
           <ul class="tt-items">
@@ -205,8 +212,8 @@
         </div>
       </span>
 
-      <span class="dim-tag">⛓️ 供应链
-        <div class="dim-tooltip">
+      <span class="dim-tag" data-dim="supply_chain">⛓️ <span data-i18n="phaseMeta.supply_chain.label">供应链</span>
+        <div class="dim-tooltip" id="tooltip-supply_chain">
           <div class="tt-title">⛓️ 供应链完整性（权重 5%）</div>
           <div class="tt-desc">评估依赖管理和分发机制是否能防止供应链攻击（依赖替换、模型篡改）。</div>
           <ul class="tt-items">
@@ -220,8 +227,8 @@
         </div>
       </span>
 
-      <span class="dim-tag">🐳 运行时
-        <div class="dim-tooltip">
+      <span class="dim-tag" data-dim="runtime">🐳 <span data-i18n="phaseMeta.runtime.label">运行时</span>
+        <div class="dim-tooltip" id="tooltip-runtime">
           <div class="tt-title">🐳 运行时隔离（权重 5%）</div>
           <div class="tt-desc">评估 Agent 是否被容器化或沙箱化部署，防止逃逸到宿主环境。</div>
           <ul class="tt-items">
@@ -238,24 +245,25 @@
     </div>
 
     <!-- About / Scope Panel (inside gradient banner) -->
-    <div class="max-w-3xl mx-auto mt-6">
+    <div class="max-w-5xl mx-auto mt-6">
       <div class="rounded-xl overflow-hidden" style="background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12);">
         <button onclick="toggleAbout()" class="w-full flex items-center justify-between px-5 py-3 text-left">
-          <span class="text-sm font-semibold text-indigo-200 flex items-center gap-2">
-            ⚠️ 能力边界说明：本工具仅做静态代码分析，以下运行时行为无法发现：
+          <span class="text-sm font-semibold text-indigo-200 flex items-center gap-2" id="scopeTitle" data-i18n="scopeTitle">
+            ⚠️ 能力边界说明：本工具仅做静态代码分析，目的是通过对 Agent 的能力解析，做部署前的风险评估，不是恶意代码扫描。<br>以下运行时安全问题无法发现，例如：
           </span>
           <i id="aboutChevron" class="fas fa-chevron-up text-indigo-400 text-xs transition-transform"></i>
         </button>
         <div id="aboutBody" class="px-5 pb-5 text-xs space-y-4">
           <div>
-            <ul class="space-y-1.5 text-indigo-300">
-              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span>System Prompt 从远程 URL 动态加载的内容</li>
-              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span>工具调用链在运行时动态组合的行为</li>
-              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span>MCP Server 连接后实际获得的权限</li>
-              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span>Agent 运行时的真实行为与副作用</li>
+            <ul id="scopeItemsList" class="space-y-1.5 text-indigo-300">
+              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span><span>System Prompt 从远程 URL 动态加载的内容</span></li>
+              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span><span>工具调用链在运行时动态组合的行为</span></li>
+              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span><span>MCP Server 连接后实际获得的权限</span></li>
+              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span><span>Agent 运行时的真实行为与副作用</span></li>
+              <li class="flex items-start gap-1.5"><span class="text-indigo-500 mt-0.5 flex-shrink-0">•</span><span>由于文件摘要和提取策略，分析超大型项目时覆盖率会降低（如 OpenClaw）</span></li>
             </ul>
           </div>
-          <div class="pt-2 border-t text-indigo-500" style="border-color: rgba(255,255,255,0.1);">
+          <div id="scopeDisclaimer" class="pt-2 border-t text-indigo-500" style="border-color: rgba(255,255,255,0.1);" data-i18n="scopeDisclaimer">
             结果供参考，不构成最终安全结论，请联系 Security 进行进一步审核，感谢！
           </div>
         </div>
@@ -266,7 +274,7 @@
 </div>
 
 <!-- Input Card -->
-<div class="max-w-2xl mx-auto -mt-6 px-4">
+<div class="max-w-2xl mx-auto mt-8 px-4">
   <div class="card p-6">
     <label class="block text-sm font-semibold text-gray-700 mb-2">
       <i class="fab fa-github mr-1"></i> GitHub Repository URL
@@ -360,12 +368,12 @@
     <button onclick="toggleSecurityCard()" class="w-full px-6 py-4 flex items-center justify-between text-left" style="background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%);">
       <div>
         <div class="text-white font-bold text-lg flex items-center gap-2">
-          <i class="fas fa-shield-halved"></i> AppSec 安全管控建议
+          <i class="fas fa-shield-halved"></i> <span data-i18n="securityControlsTitle">AppSec 安全管控建议</span>
         </div>
-        <div class="text-indigo-300 text-xs mt-1">基于本次评估结果，由 AI 自动生成 · 如有任何问题请联系 <span class="text-indigo-200 font-semibold">Peter.Chen2</span></div>
+        <div class="text-indigo-300 text-xs mt-1"><span data-i18n="securityControlsSubtitle">基于本次评估结果，由 AI 自动生成 · 如有任何问题请联系</span> <span class="text-indigo-200 font-semibold">Peter.Chen2</span></div>
       </div>
       <div class="flex items-center gap-3">
-        <div id="controlsStatusBadge" class="text-xs px-3 py-1 rounded-full bg-indigo-700 text-indigo-200">生成中...</div>
+        <div id="controlsStatusBadge" class="text-xs px-3 py-1 rounded-full bg-indigo-700 text-indigo-200" data-i18n="controlsGenerating">生成中...</div>
         <i id="securityCardChevron" class="fas fa-chevron-up text-indigo-300 text-sm transition-transform"></i>
       </div>
     </button>
@@ -375,7 +383,7 @@
       <!-- Loading state -->
       <div id="controlsLoading" class="p-8 text-center text-gray-400">
         <i class="fas fa-circle-notch spinner text-indigo-400 text-2xl mb-3 block"></i>
-        <div class="text-sm">正在分析 Agent 能力，生成定制化安全管控建议...</div>
+        <div class="text-sm" data-i18n="controlsLoadingText">正在分析 Agent 能力，生成定制化安全管控建议...</div>
       </div>
 
       <!-- Controls content -->
@@ -399,12 +407,269 @@
 
 <!-- Footer -->
 <div class="text-center py-8 text-xs text-gray-400">
-  Data sources: GitHub API · <a href="https://securityscorecards.dev" class="hover:text-indigo-500">OpenSSF Scorecard</a> ·
-  <a href="https://osv.dev" class="hover:text-indigo-500">OSV.dev</a> · For security assessment reference only
-  <div class="mt-2">Designed and Developed by adidas AppSec · Peter Chen</div>
+  <span data-i18n="footerDataSources">Data sources: GitHub API · <a href="https://securityscorecards.dev" class="hover:text-indigo-500">OpenSSF Scorecard</a> ·
+  <a href="https://osv.dev" class="hover:text-indigo-500">OSV.dev</a> · For security assessment reference only</span>
+  <div class="mt-2" data-i18n="footerCredit">Designed and Developed by adidas AppSec · Peter Chen</div>
 </div>
 
 <script>
+  // ── i18n ───────────────────────────────────────────────────────────────────
+  let currentLang = 'zh';
+
+  const STRINGS = {
+    zh: {
+      pageTitle: 'adidas AppSec AI Agent Risk Assessment Platform',
+      analyzeBtn: 'Analyze',
+      analyzingBtn: '<i class="fas fa-circle-notch spinner"></i> Analyzing...',
+      waitingStatus: '等待中',
+      runningStatus: '<i class="fas fa-circle-notch spinner text-indigo-500"></i> Running',
+      securityControlsTitle: 'AppSec 安全管控建议',
+      securityControlsSubtitle: '基于本次评估结果，由 AI 自动生成 · 如有任何问题请联系',
+      controlsGenerating: '生成中...',
+      controlsLoadingText: '正在分析 Agent 能力，生成定制化安全管控建议...',
+      controlsFailedBadge: '生成失败',
+      controlsFailedMsg: '建议生成失败：',
+      controlsFailedContact: '如需帮助请联系 Peter.Chen2',
+      controlsBadge: (total, must) => `${total} 条建议 · ${must} 条必须`,
+      catItems: (n) => `${n} 条`,
+      catMust: (n) => `${n} 必须`,
+      scopeTitle: '⚠️ 能力边界说明：本工具仅做静态代码分析，目的是通过对 Agent 的能力解析，做部署前的风险评估，不是恶意代码扫描。<br>以下运行时安全问题无法发现，例如：',
+      scopeItems: [
+        'System Prompt 从远程 URL 动态加载的内容',
+        '工具调用链在运行时动态组合的行为',
+        'MCP Server 连接后实际获得的权限',
+        'Agent 运行时的真实行为与副作用',
+        '由于文件摘要和提取策略，分析超大型项目时覆盖率会降低（如 OpenClaw）',
+      ],
+      scopeDisclaimer: '结果供参考，不构成最终安全结论，请联系 Security 进行进一步审核，感谢！',
+      footerDataSources: 'Data sources: GitHub API · OpenSSF Scorecard · OSV.dev · For security assessment reference only',
+      footerCredit: 'Designed and Developed by adidas AppSec · Peter Chen',
+      noFindings: 'No findings',
+      findingsCollapse: ' click to collapse',
+      findingsExpand: ' click to expand',
+      priorityMust: '必须',
+      priorityRecommend: '建议',
+      priorityOptional: '可选',
+      whyNeeded: '📌 为什么需要',
+      howToImpl: '🛠️ 如何实施',
+      phaseMeta: {
+        github:       { label: '声誉与活跃度' },
+        depsdev:      { label: '依赖包健康度' },
+        code:         { label: 'Agent 能力分析' },
+        deps:         { label: '依赖漏洞扫描' },
+        ai_safety:    { label: 'AI 安全护栏' },
+        privacy:      { label: '数据隐私' },
+        supply_chain: { label: '供应链完整性' },
+        runtime:      { label: '运行时隔离' },
+      },
+      tooltips: {
+        code: {
+          title: '🤖 Agent 能力分析（权重 25%）',
+          desc: '枚举这个 AI Agent 能做什么（爆炸半径），而非找代码漏洞。由 LLM 语义分析。',
+          items: ['终端/Shell 执行：−25分（最高风险）','代码解释器/REPL：−22分','文件系统写入/删除：−18分','数据库写入：−18分','云服务/邮件/外部 API 等'],
+          weight: '高分(75+)=低影响能力；低分(&lt;35)=几乎可完全控制宿主系统'
+        },
+        ai_safety: {
+          title: '🛡️ AI 安全护栏（权重 20%）',
+          desc: '评估是否有有效的安全控制机制防止 Agent 失控或被滥用。基准 40 分（保守）。',
+          items: ['人工审批/确认循环：+15分','步骤/轮次上限：+15分','工具白名单/权限系统：+10分','Prompt Injection 防御：+8分','exec/eval 执行 LLM 输出：−25分'],
+          weight: '用户输入直接注入 System Prompt −15分；完全无安全机制 −15分'
+        },
+        github: {
+          title: '⭐ 声誉与活跃度（权重 15%）',
+          desc: '通过 GitHub 公开数据判断项目的社区信任度、维护状态和安全成熟度。',
+          items: ['Stars 数量：社区验证程度','最后提交时间：维护活跃度','贡献者数量：Bus Factor 风险','SECURITY.md：漏洞响应机制','CI/CD 工作流：代码变更是否自动检验'],
+          weight: '⚠️ 已归档仓库 −30分；停止维护超1年 +0分'
+        },
+        depsdev: {
+          title: '🌐 依赖包健康度（权重 5%）',
+          desc: '通过 deps.dev API 评估项目本身作为包的健康状况，交叉验证依赖许可证和漏洞。',
+          items: ['deps.dev 项目记录：透明度验证','Open Issues 积压：未处理问题风险','依赖者数量：供应链爆炸半径','安全公告记录：每条 −10 分'],
+          weight: '依赖者越多，该包越是供应链攻击的高价值目标'
+        },
+        deps: {
+          title: '📦 依赖漏洞扫描（权重 15%）',
+          desc: '扫描所有直接依赖的已知 CVE，通过 OSV.dev 数据库查询。',
+          items: ['CRITICAL（CVSS≥9.0）：每条 −25分','HIGH（CVSS 7.0-8.9）：每条 −12分','MEDIUM（CVSS 4.0-6.9）：每条 −5分','支持 Python / Node.js / Go / Rust'],
+          weight: '有 CRITICAL 漏洞时强烈建议暂停使用直至修复'
+        },
+        privacy: {
+          title: '🔒 数据隐私（权重 10%）',
+          desc: '评估是否存在用户数据泄露风险，包括对话内容被记录、PII 处理不当等。',
+          items: ['PRIVACY.md 文档：+15分','数据匿名化/脱敏代码：+10分','遥测默认关闭：+10分','将用户输入写入日志：−20分','第三方行为追踪 SDK：−10分'],
+          weight: '遥测默认开启（无用户同意）：−15分'
+        },
+        supply_chain: {
+          title: '⛓️ 供应链完整性（权重 5%）',
+          desc: '评估依赖管理和分发机制是否能防止供应链攻击（依赖替换、模型篡改）。',
+          items: ['依赖锁文件（poetry.lock 等）：+20分','无锁文件：−15分（版本漂移风险）','SBOM 软件物料清单：+10分','模型文件哈希校验：+5分','下载模型但无哈希校验：−10分'],
+          weight: '无锁文件时，攻击者可通过发布恶意新版本实施供应链攻击'
+        },
+        runtime: {
+          title: '🐳 运行时隔离（权重 5%）',
+          desc: '评估 Agent 是否被容器化或沙箱化部署，防止逃逸到宿主环境。',
+          items: ['Dockerfile + 非 root 用户：+35分','以 root 运行容器：−20分','挂载 Docker socket：−20分（等同宿主 root）','--privileged 标志：−20分（极度危险）','沙箱平台集成（e2b/modal等）：+10分'],
+          weight: '完全无隔离配置：−10分（Agent 直接在宿主机裸跑）'
+        },
+      },
+      categoryIcon: {
+        '能力边界管控': 'fa-shield-halved',
+        '护栏配置建议': 'fa-sliders',
+        '缺失护栏补齐': 'fa-triangle-exclamation',
+        '运维部署管控': 'fa-server',
+      },
+    },
+    en: {
+      pageTitle: 'adidas AppSec AI Agent Risk Assessment Platform',
+      analyzeBtn: 'Analyze',
+      analyzingBtn: '<i class="fas fa-circle-notch spinner"></i> Analyzing...',
+      waitingStatus: 'Pending',
+      runningStatus: '<i class="fas fa-circle-notch spinner text-indigo-500"></i> Running',
+      securityControlsTitle: 'AppSec Security Controls Recommendations',
+      securityControlsSubtitle: 'AI-generated based on this assessment · For questions contact',
+      controlsGenerating: 'Generating...',
+      controlsLoadingText: 'Analyzing agent capabilities, generating tailored security controls...',
+      controlsFailedBadge: 'Generation failed',
+      controlsFailedMsg: 'Failed to generate recommendations: ',
+      controlsFailedContact: 'For help contact Peter.Chen2',
+      controlsBadge: (total, must) => `${total} recommendations · ${must} required`,
+      catItems: (n) => `${n} items`,
+      catMust: (n) => `${n} required`,
+      scopeTitle: '⚠️ Scope Limitation: This tool performs static code analysis, parses Agent capabilities, and provides deployment security control suggestions. The following runtime security issues cannot be detected, e.g.:',
+      scopeItems: [
+        'System Prompt dynamically loaded from a remote URL',
+        'Tool call chains dynamically composed at runtime',
+        'Actual permissions granted after MCP Server connection',
+        'Real runtime behavior and side effects of the Agent',
+        'Coverage may decrease for very large projects due to file sampling and extraction strategy (e.g. OpenClaw)',
+      ],
+      scopeDisclaimer: 'Results are for reference only and do not constitute a final security decision. Please contact Security for further review. Thank you!',
+      footerDataSources: 'Data sources: GitHub API · OpenSSF Scorecard · OSV.dev · For security assessment reference only',
+      footerCredit: 'Designed and Developed by adidas AppSec · Peter Chen',
+      noFindings: 'No findings',
+      findingsCollapse: ' click to collapse',
+      findingsExpand: ' click to expand',
+      priorityMust: 'Required',
+      priorityRecommend: 'Recommended',
+      priorityOptional: 'Optional',
+      whyNeeded: '📌 Why it matters',
+      howToImpl: '🛠️ How to implement',
+      phaseMeta: {
+        github:       { label: 'Reputation & Activity' },
+        depsdev:      { label: 'Package Health' },
+        code:         { label: 'Agent Capability Analysis' },
+        deps:         { label: 'Dependency Vulnerabilities' },
+        ai_safety:    { label: 'AI Safety Guardrails' },
+        privacy:      { label: 'Data Privacy' },
+        supply_chain: { label: 'Supply Chain Integrity' },
+        runtime:      { label: 'Runtime Isolation' },
+      },
+      tooltips: {
+        code: {
+          title: '🤖 Agent Capability Analysis (Weight 25%)',
+          desc: 'Identifies all operations this AI agent can perform on the host system or external services — the "blast radius" if compromised.',
+          items: ['Shell / terminal execution: −25pts (highest risk)','Code interpreter / REPL: −22pts','File system write / delete: −18pts','Database write: −18pts','Cloud services / email / external APIs, etc.'],
+          weight: 'High score (75+) = low-impact capabilities; Low score (&lt;35) = near-full host system control'
+        },
+        ai_safety: {
+          title: '🛡️ AI Safety Guardrails (Weight 20%)',
+          desc: 'Evaluates whether effective safety controls prevent the agent from going out of control or being misused. Baseline 40 points (conservative).',
+          items: ['Human approval / confirmation loop: +15pts','Step / turn limits: +15pts','Tool allowlist / permission system: +10pts','Prompt injection defense: +8pts','exec/eval on LLM output: −25pts'],
+          weight: 'User input directly injected into System Prompt −15pts; No safety mechanisms at all −15pts'
+        },
+        github: {
+          title: '⭐ Reputation & Activity (Weight 15%)',
+          desc: 'Uses public GitHub data to assess community trust, maintenance status, and security maturity.',
+          items: ['Stars: community validation level','Last commit date: maintenance activity','Contributor count: bus factor risk','SECURITY.md: vulnerability response process','CI/CD workflows: automated code validation'],
+          weight: '⚠️ Archived repo −30pts; Unmaintained >1 year +0pts'
+        },
+        depsdev: {
+          title: '🌐 Package Health (Weight 5%)',
+          desc: "Evaluates the project's own health as a package via deps.dev API, cross-checking dependency licenses and vulnerabilities.",
+          items: ['deps.dev project record: transparency check','Open issues backlog: unresolved risk','Dependent count: supply chain blast radius','Security advisories: −10pts each'],
+          weight: 'More dependents = higher-value supply chain attack target'
+        },
+        deps: {
+          title: '📦 Dependency Vulnerability Scan (Weight 15%)',
+          desc: 'Scans all direct dependencies for known CVEs via the OSV.dev database.',
+          items: ['CRITICAL (CVSS≥9.0): −25pts each','HIGH (CVSS 7.0-8.9): −12pts each','MEDIUM (CVSS 4.0-6.9): −5pts each','Supports Python / Node.js / Go / Rust'],
+          weight: 'Critical vulnerabilities: strongly recommend halting use until patched'
+        },
+        privacy: {
+          title: '🔒 Data Privacy (Weight 10%)',
+          desc: 'Assesses risk of user data leakage including conversation content logging and improper PII handling.',
+          items: ['PRIVACY.md documentation: +15pts','Data anonymization / masking code: +10pts','Telemetry off by default: +10pts','Writing user input to logs: −20pts','Third-party behavioral tracking SDK: −10pts'],
+          weight: 'Telemetry enabled by default (no user consent): −15pts'
+        },
+        supply_chain: {
+          title: '⛓️ Supply Chain Integrity (Weight 5%)',
+          desc: 'Evaluates whether dependency management and distribution prevents supply chain attacks (dependency substitution, model tampering).',
+          items: ['Lock file (poetry.lock etc.): +20pts','No lock file: −15pts (version drift risk)','SBOM software bill of materials: +10pts','Model file hash verification: +5pts','Downloads model without hash check: −10pts'],
+          weight: 'Without a lock file, attackers can publish malicious new versions for supply chain attacks'
+        },
+        runtime: {
+          title: '🐳 Runtime Isolation (Weight 5%)',
+          desc: 'Evaluates whether the Agent is containerized or sandboxed to prevent escape to the host environment.',
+          items: ['Dockerfile + non-root user: +35pts','Container running as root: −20pts','Docker socket mounted: −20pts (equivalent to host root)','--privileged flag: −20pts (extremely dangerous)','Sandbox platform integration (e2b/modal etc.): +10pts'],
+          weight: 'No isolation whatsoever: −10pts (Agent runs directly on host)'
+        },
+      },
+      categoryIcon: {
+        'Capability Boundary Controls': 'fa-shield-halved',
+        'Guardrail Configuration':      'fa-sliders',
+        'Missing Guardrails':           'fa-triangle-exclamation',
+        'Ops & Deployment':             'fa-server',
+      },
+    },
+  };
+
+  function toggleLang() {
+    currentLang = currentLang === 'zh' ? 'en' : 'zh';
+    const btn = document.getElementById('langToggle');
+    btn.textContent = currentLang === 'zh' ? 'English' : '中文';
+    applyLang();
+  }
+
+  function applyLang() {
+    const S = STRINGS[currentLang];
+    // Update PHASE_META labels
+    Object.keys(PHASE_META).forEach(k => {
+      if (S.phaseMeta[k]) PHASE_META[k].label = S.phaseMeta[k].label;
+    });
+    // Update static elements by data-i18n attribute
+    document.querySelectorAll('[data-i18n]').forEach(el => {
+      const key = el.dataset.i18n;
+      const val = key.split('.').reduce((o, k) => o?.[k], S);
+      if (val !== undefined) el.textContent = val;
+    });
+    // Update scope items text
+    const items = document.querySelectorAll('#scopeItemsList li span:last-child');
+    S.scopeItems.forEach((text, i) => { if (items[i]) items[i].textContent = text; });
+    // Rebuild tooltip HTML from STRINGS
+    rebuildTooltips();
+    // Update progress items already rendered
+    PHASE_ORDER.forEach(key => {
+      const el = document.querySelector(`#prog-${key} span.flex-1`);
+      if (el) el.textContent = PHASE_META[key].label;
+    });
+  }
+
+  function rebuildTooltips() {
+    const S = STRINGS[currentLang];
+    Object.keys(S.tooltips).forEach(dim => {
+      const el = document.getElementById(`tooltip-${dim}`);
+      if (!el) return;
+      const t = S.tooltips[dim];
+      const itemsHtml = (t.items || []).map(item => `<li>${item}</li>`).join('');
+      el.innerHTML = `
+        <div class="tt-title">${t.title}</div>
+        <div class="tt-desc">${t.desc}</div>
+        <ul class="tt-items">${itemsHtml}</ul>
+        <div class="tt-weight">${t.weight}</div>
+      `;
+    });
+  }
+
   const PHASE_META = {
     github:       { icon: '⭐', label: '声誉与活跃度',         fullWidth: false },
     depsdev:      { icon: '🌐', label: '依赖包健康度',       fullWidth: false },
@@ -455,12 +720,12 @@ function startAnalysis() {
     el.innerHTML = `
       <span class="text-lg">${meta.icon}</span>
       <span class="flex-1 text-sm text-gray-600">${meta.label}</span>
-      <span id="prog-status-${key}" class="text-xs text-gray-400">等待中</span>
+      <span id="prog-status-${key}" class="text-xs text-gray-400">${STRINGS[currentLang].waitingStatus}</span>
     `;
     document.getElementById('progressItems').appendChild(el);
   });
 
-  const params = new URLSearchParams({ url });
+  const params = new URLSearchParams({ url, lang: currentLang });
   if (token) params.set('token', token);
 
   const es = new EventSource(`/api/analyze?${params}`);
@@ -499,7 +764,7 @@ function handleEvent(data) {
     const el = document.getElementById(`prog-${data.phase}`);
     const st = document.getElementById(`prog-status-${data.phase}`);
     if (el) el.className = 'flex items-center gap-3 p-3 rounded-lg bg-indigo-50';
-    if (st) st.innerHTML = '<i class="fas fa-circle-notch spinner text-indigo-500"></i> Running';
+    if (st) st.innerHTML = STRINGS[currentLang].runningStatus;
   }
 
   if (data.type === 'result') {
@@ -577,19 +842,15 @@ function renderDimensionCard(phase, name, data) {
     .sort((a, b) => (severityOrder[a.type] ?? 9) - (severityOrder[b.type] ?? 9));
   findings = [...infoFindings, ...otherFindings];
 
-  // Render each finding as a collapsible row
-  // INFO type (score breakdown) is always expanded; others collapsed by default
   let findingCounter = 0;
   const findingsHTML = findings.map(f => {
     const fid = `f-${phase}-${findingCounter++}`;
     const isInfo = f.type === 'INFO';
     const titleContent = f.is_html ? f.title : escHtml(f.title);
     const detailContent = f.detail ? (f.is_html ? f.detail : escHtml(f.detail)) : '';
-
     const chevronColor = {POSITIVE:'#16a34a', CRITICAL:'#dc2626', HIGH:'#ea580c', MEDIUM:'#ca8a04', LOW:'#94a3b8', INFO:'#6366f1'}[f.type] || '#6b7280';
 
     if (isInfo) {
-      // Score breakdown: always visible, no toggle
       return `
         <div class="finding-${f.type} p-2 rounded text-xs mb-1">
           <div class="font-medium text-gray-700">${titleContent}</div>
@@ -615,19 +876,20 @@ function renderDimensionCard(phase, name, data) {
     ? `<div class="overflow-y-auto pr-1" style="max-height:400px;">${findingsHTML}</div>`
     : findingsHTML;
 
-  const collapseId = `findings-${phase}`;
+  const collapseId  = `findings-${phase}`;
+  const cardBodyId  = `dimBody-${phase}`;
+  const cardChevId  = `dimChev-${phase}`;
 
   const card = document.createElement('div');
   card.id = `dim-${phase}`;
-  card.className = `card p-5 slide-in${fullWidth ? ' md:col-span-2' : ''}`;
+  card.className = `card slide-in overflow-hidden${fullWidth ? ' md:col-span-2' : ''}`;
+
   card.innerHTML = `
-    <div class="flex items-start justify-between mb-3">
-      <div>
-        <div class="font-semibold text-gray-800 text-sm">${escHtml(name)}</div>
-        <div class="text-xs text-gray-400 mt-0.5">${escHtml(data.summary || '')}</div>
-      </div>
-      <div class="flex items-center gap-2 flex-shrink-0 ml-2">
-        <div class="relative w-12 h-12">
+    <!-- Collapsible header -->
+    <button onclick="toggleDimCard('${cardBodyId}','${cardChevId}')"
+      class="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-50 transition-colors">
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="relative w-11 h-11 flex-shrink-0">
           <svg class="w-full h-full" viewBox="0 0 48 48">
             <circle cx="24" cy="24" r="20" fill="none" stroke="#e5e7eb" stroke-width="5"/>
             <circle cx="24" cy="24" r="20" fill="none" stroke="${color}" stroke-width="5"
@@ -638,38 +900,54 @@ function renderDimensionCard(phase, name, data) {
           </svg>
           <div class="absolute inset-0 flex items-center justify-center text-xs font-bold text-gray-700">${score}</div>
         </div>
-        <span class="px-2 py-1 rounded-full text-xs font-semibold badge-${risk}">${risk} RISK</span>
-      </div>
-    </div>
-    ${findings.length > 0 ? `
-      <div>
-        <button onclick="toggleFindings('${collapseId}')"
-          class="text-xs text-indigo-600 hover:underline mb-2 flex items-center gap-1">
-          <i class="fas fa-chevron-up" id="${collapseId}-icon"></i>
-          ${findings.length} finding(s) (click to collapse)
-        </button>
-        <div id="${collapseId}">
-          ${findingsBody}
+        <div class="min-w-0">
+          <div class="font-semibold text-gray-800 text-sm">${escHtml(name)}</div>
+          <div class="text-xs text-gray-400 mt-0.5 truncate">${escHtml(data.summary || '')}</div>
         </div>
       </div>
-    ` : '<div class="text-xs text-gray-400">No findings</div>'}
+      <div class="flex items-center gap-2 flex-shrink-0 ml-3">
+        <span class="px-2 py-1 rounded-full text-xs font-semibold badge-${risk}">${risk} RISK</span>
+        <i id="${cardChevId}" class="fas fa-chevron-up text-gray-400 text-xs transition-transform"></i>
+      </div>
+    </button>
+
+    <!-- Collapsible body -->
+    <div id="${cardBodyId}" class="px-5 pb-5 border-t border-gray-100">
+      ${findings.length > 0 ? `
+        <div class="mt-3">
+          <button onclick="toggleFindings('${collapseId}')"
+            class="text-xs text-indigo-600 hover:underline mb-2 flex items-center gap-1">
+            <i class="fas fa-chevron-up" id="${collapseId}-icon"></i>
+            ${findings.length} finding(s) (${STRINGS[currentLang].findingsCollapse.trim()})
+          </button>
+          <div id="${collapseId}">
+            ${findingsBody}
+          </div>
+        </div>
+      ` : `<div class="text-xs text-gray-400 mt-3">${STRINGS[currentLang].noFindings}</div>`}
+    </div>
   `;
 
   // Insert card in defined order
   const grid = document.getElementById('dimensionGrid');
-  const order = PHASE_ORDER;
-  const myIndex = order.indexOf(phase);
+  const myIndex = PHASE_ORDER.indexOf(phase);
   let inserted = false;
-  const cards = grid.querySelectorAll('[id^="dim-"]');
-  for (const existing of cards) {
-    const existingPhase = existing.id.replace('dim-', '');
-    if (order.indexOf(existingPhase) > myIndex) {
-      grid.insertBefore(card, existing);
+  for (const existingCard of grid.querySelectorAll('[id^="dim-"]')) {
+    if (PHASE_ORDER.indexOf(existingCard.id.replace('dim-', '')) > myIndex) {
+      grid.insertBefore(card, existingCard);
       inserted = true;
       break;
     }
   }
   if (!inserted) grid.appendChild(card);
+}
+
+function toggleDimCard(bodyId, chevId) {
+  const body = document.getElementById(bodyId);
+  const chev = document.getElementById(chevId);
+  if (!body) return;
+  const collapsed = body.classList.toggle('hidden');
+  if (chev) chev.style.transform = collapsed ? 'rotate(180deg)' : '';
 }
 
 function toggleFinding(id) {
@@ -689,14 +967,15 @@ function toggleFinding(id) {
 function toggleFindings(id) {
   const el = document.getElementById(id);
   const icon = document.getElementById(`${id}-icon`);
+  const S = STRINGS[currentLang];
   if (el.classList.contains('hidden')) {
     el.classList.remove('hidden');
     icon.className = 'fas fa-chevron-up';
-    icon.closest('button').childNodes[icon.closest('button').childNodes.length - 1].textContent = ' click to collapse';
+    icon.closest('button').lastChild.textContent = S.findingsCollapse;
   } else {
     el.classList.add('hidden');
     icon.className = 'fas fa-chevron-down';
-    icon.closest('button').childNodes[icon.closest('button').childNodes.length - 1].textContent = ' click to expand';
+    icon.closest('button').lastChild.textContent = S.findingsExpand;
   }
 }
 
@@ -780,17 +1059,19 @@ async function fetchSecurityControls(overall) {
         code_result: allResults['code'] || {},
         ai_safety_result: allResults['ai_safety'] || {},
         runtime_result: allResults['runtime'] || {},
-        privacy_result: allResults['privacy'] || {},
-        supply_chain_result: allResults['supply_chain'] || {},
+        privacy_result: {},
+        supply_chain_result: {},
+        lang: currentLang,
       })
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     renderSecurityControls(data.controls || []);
   } catch (e) {
+    const S = STRINGS[currentLang];
     document.getElementById('controlsLoading').innerHTML =
-      `<div class="text-red-400 text-sm"><i class="fas fa-exclamation-circle mr-1"></i>建议生成失败：${e.message}。如需帮助请联系 Peter.Chen2</div>`;
-    document.getElementById('controlsStatusBadge').textContent = '生成失败';
+      `<div class="text-red-400 text-sm"><i class="fas fa-exclamation-circle mr-1"></i>${S.controlsFailedMsg}${e.message}。${S.controlsFailedContact}</div>`;
+    document.getElementById('controlsStatusBadge').textContent = S.controlsFailedBadge;
     document.getElementById('controlsStatusBadge').className = 'text-xs px-3 py-1 rounded-full bg-red-800 text-red-200';
   }
 }
@@ -799,31 +1080,27 @@ function renderSecurityControls(controls) {
   const loading = document.getElementById('controlsLoading');
   const content = document.getElementById('controlsContent');
   const badge   = document.getElementById('controlsStatusBadge');
+  const S = STRINGS[currentLang];
 
   loading.classList.add('hidden');
   content.classList.remove('hidden');
 
   const mustCount = controls.filter(c => c.priority === 'MUST').length;
-  badge.textContent = `${controls.length} 条建议 · ${mustCount} 条必须`;
+  badge.textContent = S.controlsBadge(controls.length, mustCount);
   badge.className = 'text-xs px-3 py-1 rounded-full bg-green-700 text-green-100';
 
   const priorityMeta = {
-    MUST:      { label: '必须', cls: 'bg-red-100 text-red-700 border border-red-200',      icon: '🔴' },
-    RECOMMEND: { label: '建议', cls: 'bg-amber-100 text-amber-700 border border-amber-200', icon: '🟡' },
-    OPTIONAL:  { label: '可选', cls: 'bg-blue-100 text-blue-700 border border-blue-200',    icon: '🔵' },
+    MUST:      { label: S.priorityMust,      cls: 'bg-red-100 text-red-700 border border-red-200',      icon: '🔴' },
+    RECOMMEND: { label: S.priorityRecommend, cls: 'bg-amber-100 text-amber-700 border border-amber-200', icon: '🟡' },
+    OPTIONAL:  { label: S.priorityOptional,  cls: 'bg-blue-100 text-blue-700 border border-blue-200',    icon: '🔵' },
   };
 
-  const categoryIcon = {
-    '调用方代码':   'fa-code',
-    '运维部署':     'fa-server',
-    '监控与审计':   'fa-chart-line',
-    '数据安全':     'fa-lock',
-  };
+  const categoryIcon = S.categoryIcon;
 
   // Group by category
   const grouped = {};
   controls.forEach(c => {
-    const cat = c.category || '其他';
+    const cat = c.category || (currentLang === 'en' ? 'Other' : '其他');
     if (!grouped[cat]) grouped[cat] = [];
     grouped[cat].push(c);
   });
@@ -845,8 +1122,8 @@ function renderSecurityControls(controls) {
           <div class="flex items-center gap-2">
             <i class="fas ${icon} text-indigo-500 text-sm"></i>
             <span class="font-semibold text-gray-700 text-sm">${cat}</span>
-            <span class="text-xs text-gray-400">${items.length} 条</span>
-            ${mustItems.length > 0 ? `<span class="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-600 font-medium">${mustItems.length} 必须</span>` : ''}
+            <span class="text-xs text-gray-400">${S.catItems(items.length)}</span>
+            ${mustItems.length > 0 ? `<span class="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-600 font-medium">${S.catMust(mustItems.length)}</span>` : ''}
           </div>
           <i id="cat-chevron-${catId}" class="fas fa-chevron-up text-gray-400 text-xs transition-transform"></i>
         </button>
@@ -865,17 +1142,16 @@ function renderSecurityControls(controls) {
                     <span class="font-semibold text-gray-800 text-sm">${c.title}</span>
                     <span class="text-xs px-2 py-0.5 rounded-full font-medium ${pm.cls}">${pm.label}</span>
                   </div>
-                  <div class="text-xs text-gray-500 mt-1 line-clamp-2">${c.reason}</div>
                 </div>
                 <i id="chevron-${id}" class="fas fa-chevron-down text-gray-400 text-xs mt-1 flex-shrink-0 transition-transform ${isMust ? 'rotate-180' : ''}"></i>
               </button>
               <div id="${id}" class="${isMust ? '' : 'hidden'} px-4 pb-4 pt-0 space-y-3">
                 <div class="bg-amber-50 rounded p-3" style="border-left: 3px solid #f59e0b;">
-                  <div class="text-xs font-semibold text-amber-700 mb-1">📌 为什么需要</div>
+                  <div class="text-xs font-semibold text-amber-700 mb-1">${S.whyNeeded}</div>
                   <div class="text-xs text-amber-800 leading-relaxed">${c.reason}</div>
                 </div>
                 <div class="bg-indigo-50 rounded p-3" style="border-left: 3px solid #6366f1;">
-                  <div class="text-xs font-semibold text-indigo-700 mb-1">🛠️ 如何实施</div>
+                  <div class="text-xs font-semibold text-indigo-700 mb-1">${S.howToImpl}</div>
                   <div class="text-xs text-indigo-900 leading-relaxed whitespace-pre-wrap">${c.implementation}</div>
                 </div>
               </div>

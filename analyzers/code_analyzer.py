@@ -16,21 +16,21 @@ def _esc(s: str) -> str:
 
 # ── Risk weight per capability category ──────────────────────────────────────
 CATEGORY_RISK = {
-    "terminal":       {"label": "终端 / Shell 执行",          "icon": "💻", "weight": 25},
-    "code_execution": {"label": "代码解释器 / REPL",           "icon": "⚙️",  "weight": 22},
-    "computer_use":   {"label": "计算机 / 桌面控制",           "icon": "🖥️",  "weight": 22},
-    "file_write":     {"label": "文件系统写入 / 删除",         "icon": "✏️",  "weight": 18},
-    "database_write": {"label": "数据库写入",                  "icon": "🗄️",  "weight": 18},
-    "email":          {"label": "邮件 / 消息发送",             "icon": "📧",  "weight": 15},
-    "cloud_services": {"label": "云服务（AWS/GCP/Azure）",     "icon": "☁️", "weight": 15},
-    "external_api":   {"label": "外部 API 调用",               "icon": "🌐",  "weight": 12},
-    "browser":        {"label": "网页浏览器自动化",            "icon": "🌍",  "weight": 12},
-    "file_read":      {"label": "文件系统读取",                "icon": "📂",  "weight": 8},
-    "database_read":  {"label": "数据库读取",                  "icon": "🔍",  "weight": 8},
-    "web_search":     {"label": "网络 / 互联网搜索",           "icon": "🔎",  "weight": 5},
-    "memory":         {"label": "长期记忆 / 存储",             "icon": "🧠",  "weight": 5},
-    "auth":           {"label": "凭证 / 认证访问",             "icon": "🔑",  "weight": 10},
-    "other":          {"label": "其他能力",                    "icon": "🔧",  "weight": 5},
+    "terminal":       {"label": "终端 / Shell 执行",          "label_en": "Terminal / Shell Execution",   "icon": "💻", "weight": 25},
+    "code_execution": {"label": "代码解释器 / REPL",           "label_en": "Code Interpreter / REPL",      "icon": "⚙️",  "weight": 22},
+    "computer_use":   {"label": "计算机 / 桌面控制",           "label_en": "Computer / Desktop Control",   "icon": "🖥️",  "weight": 22},
+    "file_write":     {"label": "文件系统写入 / 删除",         "label_en": "File System Write / Delete",   "icon": "✏️",  "weight": 18},
+    "database_write": {"label": "数据库写入",                  "label_en": "Database Write",               "icon": "🗄️",  "weight": 18},
+    "email":          {"label": "邮件 / 消息发送",             "label_en": "Email / Message Sending",      "icon": "📧",  "weight": 15},
+    "cloud_services": {"label": "云服务（AWS/GCP/Azure）",     "label_en": "Cloud Services (AWS/GCP/Azure)","icon": "☁️", "weight": 15},
+    "external_api":   {"label": "外部 API 调用",               "label_en": "External API Calls",           "icon": "🌐",  "weight": 12},
+    "browser":        {"label": "网页浏览器自动化",            "label_en": "Browser Automation",           "icon": "🌍",  "weight": 12},
+    "file_read":      {"label": "文件系统读取",                "label_en": "File System Read",             "icon": "📂",  "weight": 8},
+    "database_read":  {"label": "数据库读取",                  "label_en": "Database Read",                "icon": "🔍",  "weight": 8},
+    "web_search":     {"label": "网络 / 互联网搜索",           "label_en": "Web / Internet Search",        "icon": "🔎",  "weight": 5},
+    "memory":         {"label": "长期记忆 / 存储",             "label_en": "Long-term Memory / Storage",   "icon": "🧠",  "weight": 5},
+    "auth":           {"label": "凭证 / 认证访问",             "label_en": "Credentials / Auth Access",    "icon": "🔑",  "weight": 10},
+    "other":          {"label": "其他能力",                    "label_en": "Other Capabilities",           "icon": "🔧",  "weight": 5},
 }
 
 # Map LLM severity to display type
@@ -96,13 +96,14 @@ class CodeAnalyzer:
     QWEN_MODEL        = "qwen-plus"
     QWEN_TURBO_MODEL  = "qwen-turbo"
     STAGE1_PREVIEW_LINES  = 50    # lines read per file in stage 1
-    STAGE1_MAX_CANDIDATES = 40    # candidate files sent to stage 1 ranker
-    STAGE2_MAX_FILES      = 15    # files selected for deep analysis
-    MAX_LINES_PER_FILE    = 600   # deep scan lines in stage 2 (up from 400)
+    STAGE1_MAX_CANDIDATES = 80    # candidate files sent to stage 1 ranker
+    STAGE2_MAX_FILES      = 25    # files selected for deep analysis
+    MAX_LINES_PER_FILE    = 600   # deep scan lines in stage 2
 
-    def __init__(self, owner: str, repo: str, token: str = None):
+    def __init__(self, owner: str, repo: str, token: str = None, lang: str = "zh"):
         self.owner = owner
         self.repo  = repo
+        self.lang  = lang
         self.gh_headers = {
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "AI-Risk-Evaluator/1.0",
@@ -137,15 +138,25 @@ class CodeAnalyzer:
                     candidates = [name] + [f for f in candidates if f.lower() != name.lower()]
                     break
 
-            # ── Import tracking: fetch entry files and boost their imports ────
+            # ── Import tracking: 2-level deep from entry files ────────────────
             entry_contents: Dict[str, str] = {}
             for path in all_files:
                 if path.split("/")[-1] in ENTRY_NAMES:
                     c = await self._fetch_file(gh, path, default_branch)
                     if c:
                         entry_contents[path] = c
+
             if entry_contents:
                 candidates = boost_imports(entry_contents, all_files, candidates, self.STAGE1_MAX_CANDIDATES)
+                # Level 2: also trace imports of the newly boosted files
+                level1_paths = [p for p in candidates if p not in entry_contents][:15]
+                level1_contents: Dict[str, str] = {}
+                for path in level1_paths:
+                    c = await self._fetch_file(gh, path, default_branch)
+                    if c:
+                        level1_contents[path] = c
+                if level1_contents:
+                    candidates = boost_imports(level1_contents, all_files, candidates, self.STAGE1_MAX_CANDIDATES)
 
             # ── Stage 1: fetch 50-line previews of all candidates ─────────────
             previews: Dict[str, str] = {}
@@ -187,7 +198,27 @@ class CodeAnalyzer:
         for path, snippet in previews.items():
             preview_text += f"\n--- {path} ---\n{snippet}\n"
 
-        prompt = f"""你是一个代码文件相关性排序器。
+        if self.lang == "en":
+            prompt = f"""You are a code file relevance ranker.
+
+Task: From the candidate file previews below, select the {self.STAGE2_MAX_FILES} most relevant files for analyzing "what operations can this AI Agent perform (blast radius)".
+
+Prioritize:
+- Files that define tools/skills/actions/executors
+- Files containing shell/bash/file/database/cloud/email/browser operations
+- Agent entry files (main.py, app.py, agent.py, etc.)
+- README (if it exists)
+
+Exclude: test files, config-only files, documentation files, empty files.
+
+Candidate file previews:
+{preview_text}
+
+Return in JSON format with only the file path list:
+{{"selected_files": ["path1", "path2", ...]}}"""
+            sys_content = "You are a code file relevance ranking expert. Output strict JSON."
+        else:
+            prompt = f"""你是一个代码文件相关性排序器。
 
 任务：从下列候选文件的预览中，选出最适合用来分析「AI Agent 具备哪些操作能力（爆炸半径）」的 {self.STAGE2_MAX_FILES} 个文件。
 
@@ -204,13 +235,14 @@ class CodeAnalyzer:
 
 以 JSON 格式返回，只包含文件路径列表：
 {{"selected_files": ["path1", "path2", ...]}}"""
+            sys_content = "你是代码文件相关性排序专家，输出严格的 JSON。"
 
         payload = {
             "model": self.QWEN_TURBO_MODEL,
             "temperature": 0.0,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": "你是代码文件相关性排序专家，输出严格的 JSON。"},
+                {"role": "system", "content": sys_content},
                 {"role": "user",   "content": prompt},
             ],
         }
@@ -241,12 +273,18 @@ class CodeAnalyzer:
     # ── LLM call ──────────────────────────────────────────────────────────────
 
     async def _call_llm(self, combined_source: str):
+        sys_prompt = SYSTEM_PROMPT
+        if self.lang == "en":
+            sys_prompt = SYSTEM_PROMPT.replace(
+                "- All text fields (name, description) MUST be written in Chinese (Simplified Chinese). Evidence should keep the original code snippet.",
+                "IMPORTANT: Output ALL text fields (name, description, capability_summary) in English only. Evidence should keep the original code snippet."
+            )
         payload = {
             "model": self.QWEN_MODEL,
             "temperature": 0.05,
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": sys_prompt},
                 {"role": "user",   "content": f"Enumerate all capabilities of this AI agent:\n\n{combined_source}"},
             ],
         }
@@ -274,7 +312,8 @@ class CodeAnalyzer:
 
         # Score: start at 100, deduct by capability risk weights
         score = 100
-        score_steps = [("基准分（未发现能力）", 100, 100)]
+        en = self.lang == "en"
+        score_steps = [("Baseline (no capabilities detected)" if en else "基准分（未发现能力）", 100, 100)]
         findings = []
 
         # Category severity order for display
@@ -293,7 +332,8 @@ class CodeAnalyzer:
             # Deduct once per category (even if multiple findings in category)
             deduct = meta["weight"]
             score -= deduct
-            score_steps.append((f'{meta["icon"]} {meta["label"]}', -deduct, score))
+            cat_label = meta["label_en"] if en else meta["label"]
+            score_steps.append((f'{meta["icon"]} {cat_label}', -deduct, score))
 
             for cap in caps:
                 sev     = cap.get("severity", "MEDIUM")
@@ -355,7 +395,7 @@ class CodeAnalyzer:
         if summary:
             findings.insert(0, {
                 "type":    "POSITIVE",
-                "title":   "📋 能力摘要",
+                "title":   "📋 Capability Summary" if en else "📋 能力摘要",
                 "detail":  f'<div style="color:#374151;line-height:1.6;">{_esc(summary)}</div>',
                 "is_html": True,
             })
@@ -369,7 +409,29 @@ class CodeAnalyzer:
             f'</tr>'
             for label, d, total in score_steps
         ])
-        score_html = f"""<div style="font-size:11px;">
+        if en:
+            score_html = f"""<div style="font-size:11px;">
+  <div style="margin-bottom:6px;color:#6b7280;">
+    Score reflects <b>blast radius</b>: stronger capabilities = lower score.<br/>
+    Terminal/Shell <b>−25</b> · Code Exec/Computer Control <b>−22</b> · File Write/DB Write <b>−18</b> ·
+    Email/Cloud <b>−15</b> · Credentials <b>−10</b> · External API/Browser <b>−12</b> · File Read <b>−8</b> · Search <b>−5</b>
+  </div>
+  <table style="width:100%;border-collapse:collapse;background:#f8fafc;border-radius:6px;overflow:hidden;border:1px solid #e2e8f0;">
+    <thead><tr style="background:#e2e8f0;font-weight:600;color:#475569;">
+      <th style="padding:4px 8px;text-align:left;">Detected Capability</th>
+      <th style="padding:4px 8px;text-align:right;">Score Change</th>
+      <th style="padding:4px 8px;text-align:right;">Running Total</th>
+    </tr></thead>
+    <tbody>{criteria_rows}</tbody>
+    <tfoot><tr style="background:#1e1b4b;color:white;font-weight:bold;">
+      <td style="padding:4px 8px;">Final Score (capped 0–100)</td>
+      <td></td>
+      <td style="padding:4px 8px;text-align:right;font-size:13px;">{score}</td>
+    </tr></tfoot>
+  </table>
+</div>"""
+        else:
+            score_html = f"""<div style="font-size:11px;">
   <div style="margin-bottom:6px;color:#6b7280;">
     分数反映<b>爆炸半径</b>：检测到的能力越强，分数越低。<br/>
     终端/Shell <b>−25</b> · 代码执行/计算机控制 <b>−22</b> · 文件写入/数据库写入 <b>−18</b> ·
@@ -398,10 +460,15 @@ class CodeAnalyzer:
         })
 
         total_caps = high_count + med_count + low_count
+        summary_str = (
+            f"{total_caps} capabilities · {high_count} high-impact · {files_scanned} files scanned (LLM analysis)"
+            if en else
+            f"{total_caps} 项能力 · {high_count} 高影响 · {files_scanned} 个文件已扫描（LLM分析）"
+        )
         return {
             "score":      score,
             "risk_level": self._score_to_risk(score),
-            "summary":    f"{total_caps} 项能力 · {high_count} 高影响 · {files_scanned} 个文件已扫描（LLM分析）",
+            "summary":    summary_str,
             "findings":   findings,
             "metrics": {
                 "files_scanned":   files_scanned,
@@ -416,20 +483,76 @@ class CodeAnalyzer:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _select_files(self, files: List[str]) -> List[str]:
-        priority, secondary = [], []
-        skip = {"node_modules",".git","dist","build","__pycache__","venv",".venv","site-packages"}
-        src_ext = {".py",".ts",".js",".go",".rs",".java",".kt"}
-        kw = ["tool","agent","skill","action","executor","capability","function","plugin",
-              "run","main","app","workflow","handler","command","bash","shell","email",
-              "file","browser","search","memory","database","db","api","cloud","aws"]
+        skip = {"node_modules", ".git", "dist", "build", "__pycache__", "venv", ".venv",
+                "site-packages", "test", "tests", "spec", "specs", "fixtures", "mocks",
+                "migrations", "assets", "static", "public", "i18n", "locale", "docs"}
+        src_ext = {".py", ".ts", ".js", ".go", ".rs", ".java", ".kt", ".rb", ".php"}
+
+        # Directories that almost certainly contain agent capabilities — include ALL files inside
+        priority_dirs = {"tool", "tools", "action", "actions", "skill", "skills",
+                         "agent", "agents", "plugin", "plugins", "capability", "capabilities",
+                         "executor", "executors", "handler", "handlers", "command", "commands",
+                         "workflow", "workflows", "task", "tasks", "function", "functions",
+                         "service", "services", "api", "integration", "integrations"}
+
+        # Keywords scored against filename (higher signal than directory match)
+        filename_kw = {"tool", "agent", "skill", "action", "executor", "capability", "plugin",
+                       "command", "handler", "workflow", "bash", "shell", "email", "browser",
+                       "search", "memory", "database", "file", "cloud", "aws", "gcp",
+                       "azure", "api", "runner", "step", "hook", "trigger"}
+        # Keywords scored against directory path
+        dir_kw = {"tool", "agent", "skill", "action", "executor", "plugin", "command",
+                  "handler", "workflow", "service", "integration", "function"}
+        # High-value entry file names
+        entry_kw = {"main", "app", "index", "run", "start", "entry", "server", "cli",
+                    "agent", "pipeline", "orchestrat", "graph", "chain"}
+
+        scored: list[tuple[int, str]] = []
+
         for f in files:
             parts = f.split("/")
-            if any(p in skip for p in parts): continue
+            if any(p in skip for p in parts):
+                continue
             name = parts[-1].lower()
-            ext  = ("." + name.split(".")[-1]) if "." in name else ""
-            if ext in src_ext and any(k in f.lower() for k in kw): priority.append(f)
-            elif ext in src_ext and len(parts) <= 3:                secondary.append(f)
-        return (priority + secondary)[:self.STAGE1_MAX_CANDIDATES]
+            ext = ("." + name.split(".")[-1]) if "." in name else ""
+            if ext not in src_ext:
+                continue
+            stem = name.rsplit(".", 1)[0] if "." in name else name
+            dir_path = "/".join(parts[:-1]).lower()
+
+            score = 0
+
+            # +40 if file is directly inside a priority directory
+            if parts[:-1] and parts[-2].lower() in priority_dirs:
+                score += 40
+
+            # +20 if any ancestor directory matches priority dirs
+            elif any(p.lower() in priority_dirs for p in parts[:-1]):
+                score += 20
+
+            # +30 if filename matches capability keywords
+            fname_hits = sum(1 for k in filename_kw if k in stem)
+            score += fname_hits * 30
+
+            # +15 if directory path matches capability keywords
+            dir_hits = sum(1 for k in dir_kw if k in dir_path)
+            score += dir_hits * 15
+
+            # +20 for entry-point files near root
+            if any(k in stem for k in entry_kw):
+                score += 20
+
+            # Prefer shallow files (root / 1 dir deep) for secondary coverage
+            depth_bonus = max(0, 10 - len(parts) * 2)
+            score += depth_bonus
+
+            # Must have at least minimal signal (skip pure config/boilerplate)
+            if score > 0:
+                scored.append((score, f))
+
+        # Sort by score descending, take top N
+        scored.sort(key=lambda x: -x[0])
+        return [f for _, f in scored[:self.STAGE1_MAX_CANDIDATES]]
 
     def _make_file_link(self, filepath: str, line_no, branch: str) -> str:
         if not filepath:
