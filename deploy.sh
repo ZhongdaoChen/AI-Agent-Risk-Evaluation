@@ -12,7 +12,11 @@ cd "$APP_DIR"
 git pull origin main
 
 echo "===> 安装/更新依赖..."
-pip3 install -q -r requirements.txt
+# Use a virtual environment to avoid externally-managed-environment errors on Debian/Ubuntu
+if [ ! -d ".venv" ]; then
+    python3 -m venv .venv
+fi
+.venv/bin/pip install -q -r requirements.txt
 
 echo "===> 停止旧进程..."
 OLD_PID=$(ss -tlnp 2>/dev/null | grep ":$PORT " | grep -oP 'pid=\K[0-9]+' | head -1)
@@ -24,7 +28,7 @@ else
 fi
 
 echo "===> 启动新服务..."
-nohup python3 -m uvicorn main:app --host 0.0.0.0 --port $PORT > "$LOG" 2>&1 &
+nohup .venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port $PORT > "$LOG" 2>&1 &
 sleep 3
 
 echo "===> 验证服务..."
