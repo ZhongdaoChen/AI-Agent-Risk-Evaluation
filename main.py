@@ -31,6 +31,7 @@ from analyzers.ai_safety_analyzer import AISafetyAnalyzer
 from analyzers.privacy_analyzer import PrivacyAnalyzer
 from analyzers.supply_chain_analyzer import SupplyChainAnalyzer
 from analyzers.runtime_analyzer import RuntimeAnalyzer
+from analyzers.skill_analyzer import SkillAnalyzer
 from translations import translate_result
 
 app = FastAPI(title="AI Agent Risk Evaluator", version="1.0.0")
@@ -61,14 +62,15 @@ def parse_github_url(url: str) -> tuple[str, str]:
 
 def calculate_overall(results: dict) -> dict:
     weights = {
-        "github":       0.15,
+        "github":       0.12,
         "depsdev":      0.05,
-        "code":         0.25,
-        "deps":         0.15,
-        "ai_safety":    0.20,
-        "privacy":      0.10,
+        "code":         0.23,
+        "deps":         0.13,
+        "ai_safety":    0.18,
+        "skill":        0.12,
+        "privacy":      0.08,
         "supply_chain": 0.05,
-        "runtime":      0.05,
+        "runtime":      0.04,
     }
     total_w, weighted = 0.0, 0.0
     for key, w in weights.items():
@@ -118,6 +120,7 @@ async def stream_analysis(url: str, token: Optional[str], lang: str = "zh") -> A
         ("code",          "🤖 Agent Capability Analysis",            CodeAnalyzer(owner, repo, token, lang=lang)),
         ("deps",          "📦 Dependency Vulnerability Scan",    DepsAnalyzer(owner, repo, token)),
         ("ai_safety",     "🛡️ AI Safety Guardrails",             AISafetyAnalyzer(owner, repo, token, lang=lang)),
+        ("skill",         "🔧 Skill Security Quality",           SkillAnalyzer(owner, repo, token, lang=lang)),
         ("privacy",       "🔒 Data Privacy",                     PrivacyAnalyzer(owner, repo, token)),
         ("supply_chain",  "⛓️ Supply Chain Integrity",           SupplyChainAnalyzer(owner, repo, token)),
         ("runtime",       "🐳 Runtime Isolation",                RuntimeAnalyzer(owner, repo, token)),
