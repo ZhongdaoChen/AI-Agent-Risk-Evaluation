@@ -1,14 +1,16 @@
 """
-Skill Security Analyzer
-Evaluates the security implementation quality of individual skills/tools defined in an AI Agent repo.
+Skill Malicious Behavior Detector
+Detects intentionally malicious operations in AI Agent skill/tool definitions.
 
-Checks per skill:
-  1. Parameter schema quality   — type constraints, enum, maxLength
-  2. Input injection risk       — params concatenated into shell/sql/prompt
-  3. Capability vs declaration  — does code match what the skill claims to do?
-  4. Data exfiltration risk     — does the skill send params/context to external URLs?
-  5. Description injection      — is the skill description user-controllable?
-  6. Least-privilege            — does a high-risk skill declare approval requirements?
+Focus: deliberate harmful intent, NOT accidental code vulnerabilities.
+
+Detects:
+  1. Data exfiltration    — read sensitive files + send to hardcoded external URL
+  2. Destructive ops      — DROP TABLE, DELETE without WHERE, rm -rf, disk wipe
+  3. Backdoor / C2        — reverse shell, hardcoded remote IP, encoded payloads
+  4. Credential harvesting— read .env / SSH keys / tokens + transmit outbound
+  5. Stealth operations   — clear logs, hide audit trails, modify timestamps
+  6. Supply chain attack  — obfuscated/encoded code, eval(base64decode(...))
 """
 import asyncio
 import base64
@@ -20,86 +22,92 @@ import httpx
 
 # ── LLM Prompt ────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT_ZH = """你是一名 AI Agent 安全工程师，专门审查 AI Agent 中 Skill/Tool 定义的实现安全性。
+SYSTEM_PROMPT_ZH = """你是一名专门识别恶意代码的安全研究员，负责审查 AI Agent Skill/Tool 定义中是否存在**故意植入的恶意行为**。
 
-你的任务不是找通用代码漏洞，而是评估每个 Skill 的安全实现质量：
-- 参数有没有类型/范围约束？
-- 参数有没有直接拼接到 shell/SQL/prompt 中（注入风险）？
-- Skill 的实际能力和其描述是否一致（声明 vs 实现）？
-- Skill 是否将参数或上下文数据发送给外部 URL（数据外传）？
-- Skill description 是否包含可被用户输入影响的动态内容（prompt 劫持）？
-- 高危 Skill（shell/file/db）是否有审批/确认机制？
+⚠️ 重要前提：你的任务不是找代码质量问题或无意的漏洞，而是识别**开发者故意写入的恶意逻辑**。
+
+判断标准——以下组合是高度可疑的：
+1. **数据窃取**：读取敏感文件（.env、id_rsa、*.key、credentials、数据库文件）+ 向硬编码的外部 URL/IP 发送请求
+2. **破坏性操作**：DROP TABLE、DELETE FROM（无 WHERE 条件）、rm -rf /、格式化磁盘、批量删除
+3. **后门/C2 通信**：反向 shell、硬编码的远程 IP/域名、eval(base64decode(...))、混淆代码
+4. **凭证收割**：读取 SSH 密钥、API token、密码文件 + 外传
+5. **隐匿行为**：清除日志、修改审计记录、隐藏进程、删除自身
+6. **供应链攻击**：base64 编码的可执行 payload、动态 import 外部恶意包
+
+判断原则：
+- 单独的"读文件"或"发 HTTP 请求"不可疑，两者组合 + 目标是敏感文件/凭证才可疑
+- 硬编码的非知名外部 IP/域名（非 API 服务商）是强信号
+- 故意混淆（base64、rot13、字符串拼接绕过检测）是强信号
+- 业务正常逻辑（如上传用户选择的文件到 S3）不算恶意
 
 返回严格 JSON，不要任何 Markdown：
 {
-  "skills": [
+  "malicious_findings": [
     {
-      "name": "<skill 名称>",
+      "skill_name": "<skill/函数名>",
       "file": "<文件路径>",
       "line": <行号或 null>,
-      "risk_level": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "SAFE",
-      "issues": [
-        {
-          "type": "INJECTION" | "NO_VALIDATION" | "EXFILTRATION" | "OVER_PRIVILEGED" | "DESC_INJECTION" | "MISMATCH" | "INFO",
-          "title": "<问题标题，≤60字>",
-          "detail": "<具体说明：哪个参数/哪行代码，风险是什么>",
-          "evidence": "<原始代码片段，≤200字符>"
-        }
-      ],
-      "good_practices": ["<做得好的安全实践，如有>"]
+      "severity": "CRITICAL" | "HIGH" | "MEDIUM",
+      "pattern": "EXFILTRATION" | "DESTRUCTIVE" | "BACKDOOR" | "CREDENTIAL_HARVEST" | "STEALTH" | "OBFUSCATION",
+      "title": "<一句话描述恶意行为，≤60字>",
+      "intent": "<说明为什么判断这是故意的而非偶然：哪些特征组合让你怀疑>",
+      "evidence": "<关键代码片段，≤250字符，保留原始代码>"
     }
   ],
-  "summary": "<2-3句总结：整体 skill 安全质量，主要风险模式>",
-  "score_delta": <整数，范围 -40 到 0，基于整体风险严重程度>
+  "clean": <true 如果没有发现任何可疑恶意行为>,
+  "summary": "<2-3句总结：是否发现恶意行为，主要风险点，整体判断>",
+  "score_delta": <整数，范围 -50 到 0>
 }
 
 评分参考：
-- 有 CRITICAL 问题（注入/外传）：-30 ~ -40
-- 有 HIGH 问题（无校验/越权）：-15 ~ -25
-- 有 MEDIUM 问题：-5 ~ -10
-- 仅有 LOW/INFO：0 ~ -5
-- 所有 skill 实现良好：0
+- 发现 CRITICAL（明确数据窃取/后门/破坏）：-40 ~ -50
+- 发现 HIGH（强可疑组合）：-20 ~ -35
+- 发现 MEDIUM（弱信号，需人工复核）：-5 ~ -15
+- 未发现恶意行为：0
 """
 
-SYSTEM_PROMPT_EN = """You are an AI Agent security engineer specializing in reviewing the security implementation quality of Skill/Tool definitions in AI Agents.
+SYSTEM_PROMPT_EN = """You are a malicious code detection specialist reviewing AI Agent Skill/Tool definitions for **deliberately planted malicious behavior**.
 
-Your job is NOT to find general code bugs, but to evaluate each skill's security implementation:
-- Do parameters have type/range constraints?
-- Are parameters directly concatenated into shell/SQL/prompt (injection risk)?
-- Does the skill's actual capability match its description (declaration vs implementation)?
-- Does the skill send parameters or context data to external URLs (data exfiltration)?
-- Does the skill description contain dynamic content controllable by user input (prompt hijacking)?
-- Do high-risk skills (shell/file/db) have approval/confirmation mechanisms?
+⚠️ Key premise: Your job is NOT to find code quality issues or accidental vulnerabilities — only identify **intentionally malicious logic written by the developer**.
+
+Suspicious patterns (combinations are key):
+1. **Data exfiltration**: Read sensitive files (.env, id_rsa, *.key, credentials, DB files) + send to hardcoded external URL/IP
+2. **Destructive ops**: DROP TABLE, DELETE FROM (no WHERE), rm -rf /, disk wipe, mass deletion
+3. **Backdoor/C2**: Reverse shell, hardcoded remote IP/domain, eval(base64decode(...)), obfuscated code
+4. **Credential harvesting**: Read SSH keys, API tokens, password files + exfiltrate
+5. **Stealth ops**: Clear logs, tamper audit records, hide processes, self-deletion
+6. **Supply chain attack**: base64-encoded executable payloads, dynamic import of external malicious packages
+
+Judgment principles:
+- "Read a file" OR "make HTTP request" alone is NOT suspicious — the combination targeting sensitive files IS
+- Hardcoded non-service-provider external IPs/domains are a strong signal
+- Intentional obfuscation (base64, rot13, string concatenation to bypass detection) is a strong signal
+- Normal business logic (e.g., upload user-selected file to S3) is NOT malicious
 
 Return strict JSON only, no Markdown:
 {
-  "skills": [
+  "malicious_findings": [
     {
-      "name": "<skill name>",
+      "skill_name": "<skill/function name>",
       "file": "<file path>",
       "line": <line number or null>,
-      "risk_level": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "SAFE",
-      "issues": [
-        {
-          "type": "INJECTION" | "NO_VALIDATION" | "EXFILTRATION" | "OVER_PRIVILEGED" | "DESC_INJECTION" | "MISMATCH" | "INFO",
-          "title": "<issue title, ≤60 chars>",
-          "detail": "<specific explanation: which parameter/line, what is the risk>",
-          "evidence": "<original code snippet, ≤200 chars>"
-        }
-      ],
-      "good_practices": ["<good security practices found, if any>"]
+      "severity": "CRITICAL" | "HIGH" | "MEDIUM",
+      "pattern": "EXFILTRATION" | "DESTRUCTIVE" | "BACKDOOR" | "CREDENTIAL_HARVEST" | "STEALTH" | "OBFUSCATION",
+      "title": "<one-line description of the malicious behavior, ≤60 chars>",
+      "intent": "<explain why this appears intentional, not accidental: what combination of signals>",
+      "evidence": "<key code snippet, ≤250 chars, keep original code>"
     }
   ],
-  "summary": "<2-3 sentence summary: overall skill security quality, main risk patterns>",
-  "score_delta": <integer, range -40 to 0, based on overall severity>
+  "clean": <true if no suspicious malicious behavior found>,
+  "summary": "<2-3 sentence summary: whether malicious behavior found, main risks, overall verdict>",
+  "score_delta": <integer, range -50 to 0>
 }
 
-Scoring guide:
-- Has CRITICAL issues (injection/exfiltration): -30 ~ -40
-- Has HIGH issues (no validation/over-privileged): -15 ~ -25
-- Has MEDIUM issues: -5 ~ -10
-- Only LOW/INFO: 0 ~ -5
-- All skills well-implemented: 0
+Scoring:
+- CRITICAL found (clear exfiltration/backdoor/destruction): -40 ~ -50
+- HIGH found (strong suspicious combination): -20 ~ -35
+- MEDIUM found (weak signal, needs human review): -5 ~ -15
+- Nothing found: 0
 """
 
 # ── Skill file discovery patterns ─────────────────────────────────────────────
@@ -310,22 +318,15 @@ class SkillAnalyzer:
             context = context[:12000] + "\n...(truncated)"
 
         user_prompt = (
-            f"Please analyze the security implementation quality of the skills/tools defined in the following files from the repo `{self.owner}/{self.repo}`.\n\n"
-            f"Focus on:\n"
-            f"1. Parameter validation gaps (missing type/range constraints)\n"
-            f"2. Injection risks (params concatenated into shell/SQL/prompt)\n"
-            f"3. Data exfiltration (params sent to external URLs)\n"
-            f"4. Over-privileged skills lacking approval gates\n"
-            f"5. Description injection (dynamic/user-controlled skill descriptions)\n\n"
+            f"Analyze the following skill/tool files from repo `{self.owner}/{self.repo}` "
+            f"for deliberately malicious behavior.\n\n"
+            f"Remember: only flag intentional malice (data theft, destruction, backdoors), "
+            f"NOT accidental code quality issues.\n\n"
             f"{context}"
         ) if en else (
-            f"请分析以下来自仓库 `{self.owner}/{self.repo}` 的文件中定义的 Skill/Tool 的安全实现质量。\n\n"
-            f"重点关注：\n"
-            f"1. 参数校验缺失（缺少类型/范围约束）\n"
-            f"2. 注入风险（参数直接拼接到 shell/SQL/prompt）\n"
-            f"3. 数据外传（参数发送到外部 URL）\n"
-            f"4. 越权 Skill 缺少审批门控\n"
-            f"5. description 注入（动态/用户可控的 skill 描述）\n\n"
+            f"请分析仓库 `{self.owner}/{self.repo}` 中以下 Skill/Tool 文件，"
+            f"识别其中是否存在**故意植入的恶意行为**。\n\n"
+            f"注意：只标记故意的恶意逻辑（数据窃取、破坏操作、后门），不标记无意的代码质量问题。\n\n"
             f"{context}"
         )
 
@@ -377,96 +378,76 @@ class SkillAnalyzer:
             else:
                 return self._error_result("LLM returned non-JSON response", en)
 
-        skills     = data.get("skills", [])
-        summary    = data.get("summary", "")
-        score_delta = max(-40, min(0, int(data.get("score_delta", 0))))
+        mal_findings = data.get("malicious_findings", [])
+        is_clean     = data.get("clean", len(mal_findings) == 0)
+        summary      = data.get("summary", "")
+        score_delta  = max(-50, min(0, int(data.get("score_delta", 0))))
 
-        # Build findings list
+        PATTERN_LABEL = {
+            "EXFILTRATION":       ("📤 数据窃取外传",    "📤 Data Exfiltration"),
+            "DESTRUCTIVE":        ("💣 破坏性操作",       "💣 Destructive Operation"),
+            "BACKDOOR":           ("🚪 后门/C2 通信",     "🚪 Backdoor / C2"),
+            "CREDENTIAL_HARVEST": ("🔑 凭证收割",         "🔑 Credential Harvesting"),
+            "STEALTH":            ("👻 隐匿行为",          "👻 Stealth Operation"),
+            "OBFUSCATION":        ("🎭 代码混淆",          "🎭 Code Obfuscation"),
+        }
+
+        SEV_TO_TYPE = {"CRITICAL": "HIGH", "HIGH": "HIGH", "MEDIUM": "MEDIUM"}
+
         findings: List[dict] = []
         critical_count = 0
         high_count     = 0
         medium_count   = 0
-        skills_total   = len(skills)
 
-        ISSUE_TYPE_LABEL = {
-            "INJECTION":      ("💉 注入风险",        "💉 Injection Risk"),
-            "NO_VALIDATION":  ("⚠️ 无参数校验",      "⚠️ No Validation"),
-            "EXFILTRATION":   ("📤 数据外传",         "📤 Data Exfiltration"),
-            "OVER_PRIVILEGED":("🔓 越权无审批",       "🔓 Over-Privileged"),
-            "DESC_INJECTION": ("🎭 描述注入",         "🎭 Description Injection"),
-            "MISMATCH":       ("🔀 声明/实现不符",    "🔀 Declaration Mismatch"),
-            "INFO":           ("ℹ️ 信息",             "ℹ️ Info"),
-        }
+        for f in mal_findings:
+            skill_name = f.get("skill_name", "Unknown")
+            f_file     = f.get("file", "")
+            f_line     = f.get("line")
+            severity   = f.get("severity", "MEDIUM")
+            pattern    = f.get("pattern", "")
+            title      = f.get("title", "")
+            intent     = f.get("intent", "")
+            evidence   = f.get("evidence", "")
 
-        RISK_TO_TYPE = {
-            "CRITICAL": "HIGH",
-            "HIGH":     "HIGH",
-            "MEDIUM":   "MEDIUM",
-            "LOW":      "LOW",
-            "SAFE":     "INFO",
-        }
-
-        for skill in skills:
-            s_name  = skill.get("name", "Unknown Skill")
-            s_file  = skill.get("file", "")
-            s_line  = skill.get("line")
-            s_risk  = skill.get("risk_level", "LOW")
-            issues  = skill.get("issues", [])
-            good    = skill.get("good_practices", [])
-
-            if s_risk == "CRITICAL":
+            if severity == "CRITICAL":
                 critical_count += 1
-            elif s_risk == "HIGH":
+            elif severity == "HIGH":
                 high_count += 1
-            elif s_risk == "MEDIUM":
+            else:
                 medium_count += 1
 
             # File link
             file_link = ""
-            if s_file:
-                base_url = f"https://github.com/{self.owner}/{self.repo}/blob/{branch}/{s_file}"
-                anchor   = f"#L{s_line}" if s_line else ""
-                file_link = f' — <a href="{base_url}{anchor}" target="_blank">{s_file}</a>'
+            if f_file:
+                base_url  = f"https://github.com/{self.owner}/{self.repo}/blob/{branch}/{f_file}"
+                anchor    = f"#L{f_line}" if f_line else ""
+                file_link = f' — <a href="{base_url}{anchor}" target="_blank">{f_file}</a>'
 
-            for issue in issues:
-                i_type    = issue.get("type", "INFO")
-                i_title   = issue.get("title", "")
-                i_detail  = issue.get("detail", "")
-                i_evidence= issue.get("evidence", "")
-                label_idx = 1 if en else 0
-                type_label = ISSUE_TYPE_LABEL.get(i_type, ("", ""))[label_idx]
-                finding_type = RISK_TO_TYPE.get(s_risk, "LOW")
+            label_idx   = 1 if en else 0
+            pat_label   = PATTERN_LABEL.get(pattern, ("⚠️ 可疑行为", "⚠️ Suspicious"))[label_idx]
+            finding_type = SEV_TO_TYPE.get(severity, "MEDIUM")
 
-                detail_html = (
-                    f"<b>Skill:</b> {s_name}{file_link}<br/>"
-                    f"<b>Issue:</b> {type_label} {i_title}<br/>"
-                    f"<b>Detail:</b> {i_detail}"
-                ) if en else (
-                    f"<b>Skill：</b>{s_name}{file_link}<br/>"
-                    f"<b>问题：</b>{type_label} {i_title}<br/>"
-                    f"<b>说明：</b>{i_detail}"
-                )
-                if i_evidence:
-                    detail_html += f"<br/><code style='font-size:11px;background:#f3f4f6;padding:2px 4px;border-radius:3px'>{i_evidence[:200]}</code>"
+            detail_html = (
+                f"<b>Skill:</b> {skill_name}{file_link}<br/>"
+                f"<b>Pattern:</b> {pat_label}<br/>"
+                f"<b>Why intentional:</b> {intent}"
+            ) if en else (
+                f"<b>Skill：</b>{skill_name}{file_link}<br/>"
+                f"<b>模式：</b>{pat_label}<br/>"
+                f"<b>判断依据：</b>{intent}"
+            )
+            if evidence:
+                detail_html += f"<br/><code style='font-size:11px;background:#fee2e2;padding:2px 4px;border-radius:3px'>{evidence[:250]}</code>"
 
-                findings.append({
-                    "type":    finding_type,
-                    "title":   f"[{s_risk}] {s_name}: {i_title}",
-                    "detail":  detail_html,
-                    "is_html": True,
-                })
-
-            # Good practices as INFO
-            for gp in good:
-                findings.append({
-                    "type":  "INFO",
-                    "title": f"✅ {s_name}: {gp}" if en else f"✅ {s_name}: {gp}",
-                    "detail": gp,
-                })
+            findings.append({
+                "type":    finding_type,
+                "title":   f"[{severity}] {pat_label} — {title}",
+                "detail":  detail_html,
+                "is_html": True,
+            })
 
         # Compute final score
-        base_score  = 100
-        final_score = max(0, min(100, base_score + score_delta))
+        final_score = max(0, min(100, 100 + score_delta))
         if   critical_count > 0:
             risk_level = "CRITICAL"
         elif high_count > 0:
@@ -476,20 +457,23 @@ class SkillAnalyzer:
         else:
             risk_level = "LOW"
 
-        # Summary finding
         files_count = len(file_contents)
-        sum_title = (
-            f"🔍 {skills_total} skills analyzed across {files_count} files · "
-            f"{critical_count} critical · {high_count} high · {medium_count} medium"
-        ) if en else (
-            f"🔍 {skills_total} 个 Skill 已分析（{files_count} 个文件）· "
-            f"{critical_count} 严重 · {high_count} 高危 · {medium_count} 中危"
-        )
-        findings.insert(0, {
-            "type":  "INFO",
-            "title": sum_title,
-            "detail": summary,
-        })
+        if is_clean:
+            clean_msg = (
+                f"✅ No malicious behavior detected across {files_count} skill files"
+            ) if en else (
+                f"✅ 已扫描 {files_count} 个 Skill 文件，未发现恶意行为"
+            )
+            findings.insert(0, {"type": "INFO", "title": clean_msg, "detail": summary})
+        else:
+            warn_title = (
+                f"🚨 {len(mal_findings)} malicious pattern(s) found · "
+                f"{critical_count} critical · {high_count} high · {medium_count} medium"
+            ) if en else (
+                f"🚨 发现 {len(mal_findings)} 个恶意行为 · "
+                f"{critical_count} 严重 · {high_count} 高危 · {medium_count} 中危"
+            )
+            findings.insert(0, {"type": "HIGH", "title": warn_title, "detail": summary})
 
         return {
             "score":      final_score,
@@ -497,12 +481,13 @@ class SkillAnalyzer:
             "summary":    summary,
             "findings":   findings,
             "metrics": {
-                "skill_files_found": files_count,
-                "skills_analyzed":   skills_total,
-                "critical":          critical_count,
-                "high":              high_count,
-                "medium":            medium_count,
-                "llm_model":         self.QWEN_MODEL,
+                "skill_files_scanned":   files_count,
+                "malicious_findings":    len(mal_findings),
+                "critical":              critical_count,
+                "high":                  high_count,
+                "medium":                medium_count,
+                "clean":                 is_clean,
+                "llm_model":             self.QWEN_MODEL,
             },
         }
 
