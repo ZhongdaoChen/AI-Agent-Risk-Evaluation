@@ -456,6 +456,7 @@
         github:       { label: '声誉与活跃度' },
         depsdev:      { label: '依赖包健康度' },
         code:         { label: 'Agent 能力分析' },
+        skill:        { label: 'Skill 恶意行为检测' },
         deps:         { label: '依赖漏洞扫描' },
         ai_safety:    { label: 'AI 安全护栏' },
         privacy:      { label: '数据隐私' },
@@ -558,6 +559,7 @@
         github:       { label: 'Reputation & Activity' },
         depsdev:      { label: 'Package Health' },
         code:         { label: 'Agent Capability Analysis' },
+        skill:        { label: 'Skill Malicious Behavior' },
         deps:         { label: 'Dependency Vulnerabilities' },
         ai_safety:    { label: 'AI Safety Guardrails' },
         privacy:      { label: 'Data Privacy' },
@@ -674,6 +676,7 @@
     github:       { icon: '⭐', label: '声誉与活跃度',         fullWidth: false },
     depsdev:      { icon: '🌐', label: '依赖包健康度',       fullWidth: false },
     code:         { icon: '🤖', label: 'Agent 能力分析',      fullWidth: true  },
+    skill:        { icon: '🔧', label: 'Skill 恶意行为检测',   fullWidth: true  },
     deps:         { icon: '📦', label: '依赖漏洞扫描', fullWidth: true  },
     ai_safety:    { icon: '🛡️', label: 'AI 安全护栏',          fullWidth: true  },
     privacy:      { icon: '🔒', label: '数据隐私',                  fullWidth: false },
@@ -682,7 +685,7 @@
   };
 
 // Desired display order
-const PHASE_ORDER = ['code', 'ai_safety', 'github', 'depsdev', 'deps', 'privacy', 'supply_chain', 'runtime'];
+const PHASE_ORDER = ['code', 'skill', 'ai_safety', 'github', 'depsdev', 'deps', 'privacy', 'supply_chain', 'runtime'];
 
 let allResults = {};
 let currentTarget = '';
