@@ -37,17 +37,38 @@ CATEGORY_RISK = {
 # Map LLM severity to display type
 SEV_TYPE = {"HIGH": "HIGH", "MEDIUM": "MEDIUM", "LOW": "LOW", "INFO": "LOW"}
 
-SYSTEM_PROMPT = """You are an AI agent security analyst. Your job is NOT to find code bugs — your job is to enumerate every operation this AI agent is capable of performing on the host system or external services.
+SYSTEM_PROMPT = """You are an AI agent security analyst. Your job is NOT to find code bugs.
 
-Think of yourself as building a "capability inventory" or "blast radius map": if this agent runs in our environment, what can it DO?
+THREAT MODEL — read carefully, this defines what matters:
+The risk we care about comes from the NON-DETERMINISM of the LLM. An attacker who manipulates the model's output (via prompt injection, jailbreak, poisoned content) can make the agent autonomously CALL ITS TOOLS to do unexpected, harmful things. Therefore a capability is security-relevant ONLY if the LLM can actually trigger it.
+
+You must distinguish two kinds of capabilities:
+  • LLM-INVOCABLE: the capability is exposed to the model as a callable tool/function (e.g. @tool / function_tool decorator, OpenAI function-calling schema, MCP inputSchema, a tool passed in tools=[...] / functions=[...], LangChain Tool()/StructuredTool, an agent action/executor the model selects), OR it is reached from inside such a tool's implementation. These are the real blast radius.
+  • DETERMINISTIC: fixed-code paths the LLM cannot steer — startup/config code, deploy scripts, business logic, framework/infra plumbing, CLI utilities run by humans. List them but mark them as NOT llm-invocable; they do NOT count toward AI blast radius.
+
+IMPORTANT — STANDALONE SKILLS / TOOLS LIBRARIES:
+A repo can be a *collection of skills/tools/plugins/MCP tools* with NO LLM driver of its own. This IS a tool surface: those skills are meant to be loaded into an agent and invoked by an LLM. In that case set has_tool_surface=true (even though is_ai_agent may be false), set project_type="skills_library" (or "tool"), and mark the skills as llm_invocable=true. The blast radius is exactly what an LLM could do by calling them. Do NOT declare such a repo "not applicable".
+
+Only set has_tool_surface=false when the repo neither drives an LLM nor exposes ANY LLM-invocable tools/skills — i.e. a pure deterministic application, library, or CLI.
+
+Enumerate EVERY operation, but tag each one honestly.
 
 Return ONLY valid JSON — no markdown, no text outside the JSON:
 {
+  "agent_assessment": {
+    "project_type": "agent" | "skills_library" | "tool" | "library" | "application" | "other",
+    "is_ai_agent": true | false,
+    "has_tool_surface": true | false,
+    "reasoning": "<1 sentence: what kind of project is this, and does it expose tools/skills an LLM can invoke? cite the evidence>"
+  },
   "capabilities": [
     {
       "category": "<one of the categories below>",
       "name": "<short capability name, max 60 chars, e.g. 'Execute arbitrary shell commands via bash tool'>",
       "severity": "HIGH" | "MEDIUM" | "LOW",
+      "llm_invocable": true | false,
+      "invocation_evidence": "<short: HOW the LLM can trigger this (e.g. 'registered via @tool', 'in tools=[] passed to the agent', 'called inside the shell tool'), OR why it is deterministic (e.g. 'only in deploy.py run by humans')>",
+      "controllability": "high" | "medium" | "low",
       "description": "<1-2 sentences: what exactly can the agent do, AND the concrete blast radius if this capability is abused (what damage/scope of impact is possible)>",
       "evidence": "<exact code snippet proving this capability exists, max 180 chars>",
       "file": "<filename>",
@@ -56,6 +77,11 @@ Return ONLY valid JSON — no markdown, no text outside the JSON:
   ],
   "capability_summary": "<A cohesive overall summary of what this project/agent does — its purpose, main workflow, and the general scope of what it operates on. Synthesize the whole picture, do NOT just list capabilities. Length MUST be ≤500 characters.>"
 }
+
+CONTROLLABILITY GUIDE (how much of the dangerous operation the LLM's output controls):
+- "high":   the model supplies the key parameter/target — e.g. the shell command string, the file path, the SQL, the email recipient/body, the URL
+- "medium": the model chooses among constrained options or supplies partial parameters
+- "low":    parameters are hardcoded/validated/whitelisted; the model only triggers a fixed action
 
 CATEGORIES (use exactly these strings):
 - "terminal"        — can run shell/bash/cmd commands
@@ -83,6 +109,7 @@ RULES:
 - Report each DISTINCT capability once — do not duplicate
 - Only report capabilities backed by actual code evidence (tool definitions, function calls, imports, configurations)
 - Be specific: "reads files from any path" is better than "reads files"
+- Set llm_invocable=true ONLY when there is evidence the model can reach it (exposed tool, or code inside a tool). When unsure and it is plainly fixed infra/deploy/config code, set llm_invocable=false
 - If a tool is defined but appears disabled or gated, note that in the description
 - Include capabilities from README/docs if the code implements them
 - Do NOT report general LLM API calls (to OpenAI/Anthropic/Qwen etc.) as "external_api" unless the agent TOOLS explicitly call external services beyond the LLM provider
@@ -182,9 +209,9 @@ class CodeAnalyzer:
                     file_contents[path] = content
 
         # Deep LLM analysis, batched when the combined context is too large.
-        raw_caps, summary, batches = await self._call_llm_batched(file_contents)
+        raw_caps, summary, batches, agent_info = await self._call_llm_batched(file_contents)
 
-        return self._build_result(raw_caps, summary, default_branch, len(file_contents), batches)
+        return self._build_result(raw_caps, summary, default_branch, len(file_contents), batches, agent_info)
 
     # ── Stage 1: file ranker (qwen-turbo) ────────────────────────────────────
 
@@ -290,10 +317,10 @@ Return in JSON format with only the file path list, most relevant first:
             batches.append("\n\n".join(current))
         return batches
 
-    async def _call_llm_batched(self, file_contents: Dict[str, str]) -> Tuple[list, str, int]:
+    async def _call_llm_batched(self, file_contents: Dict[str, str]) -> Tuple[list, str, int, dict]:
         """Run the deep capability LLM over all files, splitting into batches as needed."""
         if not file_contents:
-            return [], "", 0
+            return [], "", 0, {}
 
         batches = self._build_batches(file_contents)
         results = await asyncio.gather(
@@ -304,10 +331,14 @@ Return in JSON format with only the file path list, most relevant first:
         all_caps: list = []
         summaries: List[str] = []
         seen = set()
+        is_ai_agent = False
+        has_tool_surface = False
+        reasonings: List[str] = []
+        project_types: List[str] = []
         for r in results:
             if isinstance(r, Exception):
                 continue
-            caps, summary = r
+            caps, summary, assessment = r
             for cap in caps or []:
                 # Dedupe identical capabilities reported across batches.
                 key = (cap.get("category", "other"), (cap.get("name") or "").strip().lower())
@@ -317,6 +348,17 @@ Return in JSON format with only the file path list, most relevant first:
                 all_caps.append(cap)
             if summary:
                 summaries.append(summary)
+            # Project-level assessment: OR across batches (any batch seeing an
+            # LLM/tool surface means the project has one).
+            if isinstance(assessment, dict):
+                if assessment.get("is_ai_agent"):
+                    is_ai_agent = True
+                if assessment.get("has_tool_surface"):
+                    has_tool_surface = True
+                if assessment.get("reasoning"):
+                    reasonings.append(assessment["reasoning"])
+                if assessment.get("project_type"):
+                    project_types.append(assessment["project_type"])
 
         # One coherent overall summary. For multi-batch repos the partial summaries
         # are re-synthesized into a single ≤500-char overview instead of concatenated.
@@ -325,7 +367,17 @@ Return in JSON format with only the file path list, most relevant first:
         else:
             final_summary = await self._synthesize_summary(summaries)
 
-        return all_caps, final_summary, len(batches)
+        # Pick the most agent-like project type seen across batches.
+        TYPE_PRIORITY = ["agent", "skills_library", "tool", "application", "library", "other"]
+        project_type = next((t for t in TYPE_PRIORITY if t in project_types), "")
+
+        agent_info = {
+            "is_ai_agent": is_ai_agent,
+            "has_tool_surface": has_tool_surface,
+            "project_type": project_type,
+            "reasoning": reasonings[0] if reasonings else "",
+        }
+        return all_caps, final_summary, len(batches), agent_info
 
     async def _synthesize_summary(self, summaries: List[str]) -> str:
         """Merge partial per-batch summaries into one coherent overall summary (≤500 chars)."""
@@ -390,23 +442,45 @@ Return in JSON format with only the file path list, most relevant first:
                 )
                 r.raise_for_status()
                 data = json.loads(r.json()["choices"][0]["message"]["content"])
-                return data.get("capabilities", []), data.get("capability_summary", "")
+                return (
+                    data.get("capabilities", []),
+                    data.get("capability_summary", ""),
+                    data.get("agent_assessment", {}) or {},
+                )
         except Exception as e:
-            return [], f"LLM error: {e}"
+            return [], f"LLM error: {e}", {}
 
     # ── Build result ──────────────────────────────────────────────────────────
 
-    def _build_result(self, raw_caps: list, summary: str, branch: str, files_scanned: int, batches: int = 1) -> dict:
-        # Group by category
+    def _build_result(self, raw_caps: list, summary: str, branch: str, files_scanned: int,
+                      batches: int = 1, agent_info: dict = None) -> dict:
+        en = self.lang == "en"
+        agent_info = agent_info or {}
+        is_ai_agent      = agent_info.get("is_ai_agent", True)
+        has_tool_surface = agent_info.get("has_tool_surface", True)
+        project_type     = agent_info.get("project_type", "")
+
+        # ── D: applicable whenever there is an LLM-invocable tool/skill surface.
+        #        A standalone skills/tools library counts — those skills ARE the
+        #        surface an LLM would invoke. Only truly tool-less projects are N/A. ──
+        if not has_tool_surface:
+            return self._not_applicable_result(summary, raw_caps, agent_info, branch,
+                                                files_scanned, batches, en)
+
+        # ── A: only LLM-invocable capabilities count toward AI blast radius;
+        #        deterministic fixed-code capabilities are shown but not scored. ──
+        reachable     = [c for c in raw_caps if c.get("llm_invocable", True)]
+        deterministic = [c for c in raw_caps if not c.get("llm_invocable", True)]
+
+        # Group LLM-invocable capabilities by category
         grouped: Dict[str, list] = {}
-        for cap in raw_caps:
+        for cap in reachable:
             cat = cap.get("category", "other")
             grouped.setdefault(cat, []).append(cap)
 
         # Score: start at 100, deduct by capability risk weights
         score = 100
-        en = self.lang == "en"
-        score_steps = [("Baseline (no capabilities detected)" if en else "基准分（未发现能力）", 100, 100)]
+        score_steps = [("Baseline (no LLM-invocable capabilities)" if en else "基准分（无 LLM 可触发能力）", 100, 100)]
         findings = []
 
         # Category severity order for display
@@ -468,8 +542,28 @@ Return in JSON format with only the file path list, most relevant first:
                     )
 
                 sev_color = {"HIGH":"#dc2626","MEDIUM":"#ca8a04","LOW":"#6b7280"}.get(sev,"#6b7280")
+
+                # Controllability badge — how much of the operation the LLM steers
+                ctrl = (cap.get("controllability") or "").lower()
+                ctrl_meta = {
+                    "high":   ("#dc2626", "LLM 完全控制参数" if not en else "LLM controls params"),
+                    "medium": ("#ca8a04", "LLM 部分控制" if not en else "LLM partial control"),
+                    "low":    ("#6b7280", "参数固定/受限" if not en else "fixed/constrained"),
+                }.get(ctrl)
+                ctrl_badge = ""
+                if ctrl_meta:
+                    ctrl_badge = (
+                        f' <span style="font-size:10px;color:white;background:{ctrl_meta[0]};'
+                        f'padding:1px 6px;border-radius:8px;">🎮 {ctrl_meta[1]}</span>'
+                    )
+                inv_ev = cap.get("invocation_evidence", "")
+                inv_html = (
+                    f'<div style="color:#475569;font-size:10px;margin:2px 0;">🤖 {("LLM 可触发" if not en else "LLM-invocable")}: {_esc(inv_ev)}</div>'
+                    if inv_ev else ""
+                )
                 detail_html = (
                     f'<div style="color:{sev_color};font-weight:500;margin-bottom:4px;">{_esc(desc)}</div>'
+                    + inv_html
                     + (f'<div style="color:#6b7280;font-size:10px;margin:2px 0;">📍 Source: {file_link}</div>' if file_link else "")
                     + evidence_html
                 )
@@ -477,22 +571,46 @@ Return in JSON format with only the file path list, most relevant first:
                 icon = {"HIGH":"⚠️","MEDIUM":"🔍","LOW":"ℹ️"}.get(sev,"🔍")
                 findings.append({
                     "type":    ftype,
-                    "title":   f'{icon} {meta["icon"]} {_esc(name)}{inline_evidence}',
+                    "title":   f'{icon} {meta["icon"]} {_esc(name)}{ctrl_badge}{inline_evidence}',
                     "detail":  detail_html,
                     "is_html": True,
                 })
 
         score = max(0, min(100, score))
 
-        # ── Capability summary card: overview + top-10 most sensitive ─────────
-        summary_html = self._render_summary_card(summary, raw_caps, branch, en)
-        if summary_html:
-            findings.insert(0, {
+        # ── Deterministic capabilities (not LLM-invocable) — informational only ──
+        if deterministic:
+            det_rows = []
+            for cap in deterministic:
+                cat   = cap.get("category", "other")
+                meta  = CATEGORY_RISK.get(cat, CATEGORY_RISK["other"])
+                name  = cap.get("name", "Unknown capability")
+                desc  = cap.get("description", "")
+                why   = cap.get("invocation_evidence", "")
+                file_link = self._make_file_link(cap.get("file", ""), cap.get("line"), branch)
+                det_rows.append(
+                    f'<div style="padding:5px 0;border-bottom:1px solid #f1f5f9;">'
+                    f'<div style="font-weight:600;color:#475569;">{meta["icon"]} {_esc(name)}</div>'
+                    f'<div style="color:#64748b;font-size:11px;line-height:1.5;margin-top:2px;">{_esc(desc)}</div>'
+                    + (f'<div style="color:#94a3b8;font-size:10px;margin-top:1px;">🔒 {("固定代码，LLM 无法触发" if not en else "deterministic, not LLM-triggered")}: {_esc(why)}</div>' if why else "")
+                    + (f'<div style="color:#94a3b8;font-size:10px;">📍 {file_link}</div>' if file_link else "")
+                    + '</div>'
+                )
+            det_title = (
+                f'🔒 {len(deterministic)} Deterministic capabilities — NOT LLM-invocable, excluded from blast radius (click to expand)'
+                if en else
+                f'🔒 {len(deterministic)} 项确定性能力 — 非 LLM 可触发，不计入爆炸半径（点击展开）'
+            )
+            findings.append({
                 "type":    "POSITIVE",
-                "title":   "📋 Capability Summary" if en else "📋 能力摘要",
-                "detail":  summary_html,
+                "title":   det_title,
+                "detail":  f'<div style="line-height:1.5;">{"".join(det_rows)}</div>',
                 "is_html": True,
             })
+
+        # NOTE: the capability summary card is inserted LAST (below) so it renders
+        # first; the deterministic section above is collapsible and sorts before
+        # the LLM-invocable capabilities.
 
         # Score breakdown
         criteria_rows = "".join([
@@ -553,11 +671,42 @@ Return in JSON format with only the file path list, most relevant first:
             "is_html": True,
         })
 
+        # Clarify when the repo is a skills/tools library rather than a full agent.
+        if not is_ai_agent or project_type in ("skills_library", "tool"):
+            banner_title = (
+                "🧩 Skills/Tools library — evaluated as the tool surface an LLM would invoke"
+                if en else
+                "🧩 Skill/工具库 — 按「被 LLM 调用的工具面」评估"
+            )
+            banner_body = (
+                "This repo is a collection of skills/tools with no LLM driver of its own. The blast radius below "
+                "reflects what an LLM could do once these skills are loaded into an agent and invoked."
+                if en else
+                "该仓库是一组 Skill/工具，本身不含 LLM 驱动。下面的爆炸半径反映的是：当这些 Skill 被装载进 Agent 并由 LLM 调用后，可能造成的影响。"
+            )
+            findings.insert(0, {
+                "type":    "INFO",
+                "title":   banner_title,
+                "detail":  f'<div style="line-height:1.6;color:#374151;">{_esc(banner_body)}</div>',
+                "is_html": True,
+            })
+
+        # ── Capability summary card — inserted LAST so it renders at the very top ──
+        summary_html = self._render_summary_card(summary, raw_caps, branch, en)
+        if summary_html:
+            findings.insert(0, {
+                "type":    "INFO",
+                "title":   "📋 Capability Summary" if en else "📋 能力摘要",
+                "detail":  summary_html,
+                "is_html": True,
+            })
+
+        det_count = len(deterministic)
         total_caps = high_count + med_count + low_count
         summary_str = (
-            f"{total_caps} capabilities · {high_count} high-impact · {files_scanned} files scanned (LLM analysis)"
+            f"{total_caps} LLM-invocable capabilities · {high_count} high-impact · {det_count} deterministic (excluded) · {files_scanned} files scanned"
             if en else
-            f"{total_caps} 项能力 · {high_count} 高影响 · {files_scanned} 个文件已扫描（LLM分析）"
+            f"{total_caps} 项 LLM 可触发能力 · {high_count} 高影响 · {det_count} 项确定性能力（已排除）· {files_scanned} 个文件已扫描"
         )
         return {
             "score":      score,
@@ -567,9 +716,68 @@ Return in JSON format with only the file path list, most relevant first:
             "metrics": {
                 "files_scanned":   files_scanned,
                 "total_capabilities": total_caps,
+                "llm_invocable_capabilities": total_caps,
+                "deterministic_capabilities": det_count,
                 "high_impact":     high_count,
                 "medium_impact":   med_count,
                 "low_impact":      low_count,
+                "is_ai_agent":     is_ai_agent,
+                "has_tool_surface": has_tool_surface,
+                "project_type":    project_type,
+                "llm_model":       self.QWEN_MODEL,
+                "llm_batches":     batches,
+            },
+        }
+
+    def _not_applicable_result(self, summary: str, raw_caps: list, agent_info: dict,
+                               branch: str, files_scanned: int, batches: int, en: bool) -> dict:
+        """No LLM/tool surface detected → AI blast-radius dimension does not apply.
+
+        Returned with risk_level UNKNOWN so it is excluded from the overall weighted score.
+        """
+        reasoning = agent_info.get("reasoning", "")
+        title = (
+            "🚫 No LLM-invocable tool/skill surface — capability blast radius N/A"
+            if en else
+            "🚫 未发现面向 LLM 的工具/Skill 接口 — 能力爆炸半径不适用"
+        )
+        body = (
+            "This repo neither drives an LLM nor exposes any tools/skills an LLM could invoke "
+            "(no function-calling tools, @tool/MCP definitions, agent tool registry, or skills library). "
+            "Any capabilities here are plain deterministic code, so this AI-specific dimension is not scored "
+            "and is excluded from the overall risk."
+            if en else
+            "该仓库既不驱动 LLM，也未暴露任何可被 LLM 调用的工具/Skill（无 function-calling 工具、@tool/MCP 定义、Agent 工具注册或 Skill 库）。"
+            "此处的能力均为普通确定性代码，因此该 AI 专属维度不计分，并已从总体风险中排除。"
+        )
+        findings = [{
+            "type":   "INFO",
+            "title":  title,
+            "detail": f'<div style="line-height:1.6;color:#374151;">{_esc(body)}'
+                      + (f'<div style="color:#64748b;font-size:11px;margin-top:6px;">🔎 {_esc(reasoning)}</div>' if reasoning else "")
+                      + '</div>',
+            "is_html": True,
+        }]
+        summary_html = self._render_summary_card(summary, raw_caps, branch, en)
+        if summary_html:
+            findings.append({
+                "type":    "POSITIVE",
+                "title":   "📋 Capability Summary" if en else "📋 能力摘要",
+                "detail":  summary_html,
+                "is_html": True,
+            })
+        return {
+            "score":      100,
+            "risk_level": "UNKNOWN",
+            "summary":    ("AI capability dimension not applicable (no LLM tool surface)"
+                           if en else "AI 能力维度不适用（无 LLM 工具面）"),
+            "findings":   findings,
+            "metrics": {
+                "files_scanned":   files_scanned,
+                "is_ai_agent":     agent_info.get("is_ai_agent", False),
+                "has_tool_surface": agent_info.get("has_tool_surface", False),
+                "project_type":    agent_info.get("project_type", ""),
+                "applicable":      False,
                 "llm_model":       self.QWEN_MODEL,
                 "llm_batches":     batches,
             },
