@@ -3,12 +3,13 @@ Agent Capability Analyzer — LLM Edition
 Enumerates what operations an AI agent can potentially perform:
 what it can DO to your system, not traditional code vulnerabilities.
 """
+import asyncio
 import httpx
 import base64
 import json
 import os
 import re
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from analyzers.utils import smart_truncate, boost_imports, ENTRY_NAMES
 
 def _esc(s: str) -> str:
@@ -47,13 +48,13 @@ Return ONLY valid JSON — no markdown, no text outside the JSON:
       "category": "<one of the categories below>",
       "name": "<short capability name, max 60 chars, e.g. 'Execute arbitrary shell commands via bash tool'>",
       "severity": "HIGH" | "MEDIUM" | "LOW",
-      "description": "<1-2 sentences: what exactly can the agent do, and what is the potential impact>",
+      "description": "<1-2 sentences: what exactly can the agent do, AND the concrete blast radius if this capability is abused (what damage/scope of impact is possible)>",
       "evidence": "<exact code snippet proving this capability exists, max 180 chars>",
       "file": "<filename>",
       "line": <integer or null>
     }
   ],
-  "capability_summary": "<2-3 sentence summary of the agent's overall capability profile and blast radius>"
+  "capability_summary": "<A cohesive overall summary of what this project/agent does — its purpose, main workflow, and the general scope of what it operates on. Synthesize the whole picture, do NOT just list capabilities. Length MUST be ≤500 characters.>"
 }
 
 CATEGORIES (use exactly these strings):
@@ -96,9 +97,10 @@ class CodeAnalyzer:
     QWEN_MODEL        = "qwen-plus"
     QWEN_TURBO_MODEL  = "qwen-turbo"
     STAGE1_PREVIEW_LINES  = 50    # lines read per file in stage 1
-    STAGE1_MAX_CANDIDATES = 80    # candidate files sent to stage 1 ranker
-    STAGE2_MAX_FILES      = 25    # files selected for deep analysis
+    STAGE1_MAX_CANDIDATES = 80    # candidate files sent to stage 1 ranker (single-call ceiling)
+    STAGE2_PRIORITY_HINT  = 25    # how many files stage 1 is asked to rank as highest-priority
     MAX_LINES_PER_FILE    = 600   # deep scan lines in stage 2
+    MAX_BATCH_CHARS       = 14000 # max context chars per stage-2 LLM call; larger sets are split into batches
 
     def __init__(self, owner: str, repo: str, token: str = None, lang: str = "zh"):
         self.owner = owner
@@ -166,34 +168,32 @@ class CodeAnalyzer:
                     snippet = "\n".join(content.splitlines()[:self.STAGE1_PREVIEW_LINES])
                     previews[path] = snippet
 
-            # ── Stage 1: cheap LLM selects top 15 files ──────────────────────
+            # ── Stage 1: cheap LLM ranks all candidates (priority-first) ─────
             if not self.qwen_key:
                 return self._error_result("QWEN_API_KEY not configured")
 
             selected_paths = await self._stage1_rank_files(previews, readme_path)
 
-            # ── Stage 2: fetch + smart-truncate selected files ───────────────
+            # ── Stage 2: fetch all ranked files (no fixed file cap) ───────────
             file_contents: Dict[str, str] = {}
             for path in selected_paths:
                 content = await self._fetch_file(gh, path, default_branch)
                 if content:
                     file_contents[path] = content
 
-        # Build combined source for deep LLM call (smart truncation)
-        sections = []
-        for path, content in file_contents.items():
-            truncated = smart_truncate(content, self.MAX_LINES_PER_FILE, mode="capability")
-            sections.append(f"=== FILE: {path} ===\n{truncated}")
-        combined = "\n\n".join(sections)
+        # Deep LLM analysis, batched when the combined context is too large.
+        raw_caps, summary, batches = await self._call_llm_batched(file_contents)
 
-        raw_caps, summary = await self._call_llm(combined)
-
-        return self._build_result(raw_caps, summary, default_branch, len(file_contents))
+        return self._build_result(raw_caps, summary, default_branch, len(file_contents), batches)
 
     # ── Stage 1: file ranker (qwen-turbo) ────────────────────────────────────
 
     async def _stage1_rank_files(self, previews: Dict[str, str], readme_path: str) -> List[str]:
-        """Use cheap model to rank candidate files and return top STAGE2_MAX_FILES paths."""
+        """Use a cheap model to RANK candidate files by relevance.
+
+        Returns every candidate (no hard cap) ordered priority-first, so stage 2
+        deep-analyzes all of them while still processing the most relevant first.
+        """
         preview_text = ""
         for path, snippet in previews.items():
             preview_text += f"\n--- {path} ---\n{snippet}\n"
@@ -201,7 +201,7 @@ class CodeAnalyzer:
         if self.lang == "en":
             prompt = f"""You are a code file relevance ranker.
 
-Task: From the candidate file previews below, select the {self.STAGE2_MAX_FILES} most relevant files for analyzing "what operations can this AI Agent perform (blast radius)".
+Task: From the candidate file previews below, identify the most relevant files for analyzing "what operations can this AI Agent perform (blast radius)". List the top {self.STAGE2_PRIORITY_HINT} (or fewer) in descending relevance order.
 
 Prioritize:
 - Files that define tools/skills/actions/executors
@@ -209,18 +209,18 @@ Prioritize:
 - Agent entry files (main.py, app.py, agent.py, etc.)
 - README (if it exists)
 
-Exclude: test files, config-only files, documentation files, empty files.
+Deprioritize (but you do not need to list): test files, config-only files, documentation files, empty files.
 
 Candidate file previews:
 {preview_text}
 
-Return in JSON format with only the file path list:
+Return in JSON format with only the file path list, most relevant first:
 {{"selected_files": ["path1", "path2", ...]}}"""
             sys_content = "You are a code file relevance ranking expert. Output strict JSON."
         else:
             prompt = f"""你是一个代码文件相关性排序器。
 
-任务：从下列候选文件的预览中，选出最适合用来分析「AI Agent 具备哪些操作能力（爆炸半径）」的 {self.STAGE2_MAX_FILES} 个文件。
+任务：从下列候选文件的预览中，找出最适合用来分析「AI Agent 具备哪些操作能力（爆炸半径）」的文件，按相关性从高到低列出最重要的 {self.STAGE2_PRIORITY_HINT} 个（或更少）。
 
 优先选择：
 - 定义了工具/tool/skill/action/executor 的文件
@@ -228,12 +228,12 @@ Return in JSON format with only the file path list:
 - Agent 的主入口文件（main.py、app.py、agent.py 等）
 - README（如果存在）
 
-排除：测试文件、配置文件、文档文件、空文件。
+可降低优先级（无需列出）：测试文件、配置文件、文档文件、空文件。
 
 候选文件预览：
 {preview_text}
 
-以 JSON 格式返回，只包含文件路径列表：
+以 JSON 格式返回，只包含文件路径列表，相关性高的排在前面：
 {{"selected_files": ["path1", "path2", ...]}}"""
             sys_content = "你是代码文件相关性排序专家，输出严格的 JSON。"
 
@@ -256,21 +256,114 @@ Return in JSON format with only the file path list:
                 r.raise_for_status()
                 data = json.loads(r.json()["choices"][0]["message"]["content"])
                 selected = data.get("selected_files", [])
-                # Validate: only return paths that exist in previews
-                valid = [p for p in selected if p in previews]
-                # Fallback: if LLM returns too few, pad with remaining candidates
-                if len(valid) < self.STAGE2_MAX_FILES:
-                    for p in previews:
-                        if p not in valid:
-                            valid.append(p)
-                        if len(valid) >= self.STAGE2_MAX_FILES:
-                            break
-                return valid[:self.STAGE2_MAX_FILES]
+                # Keep ranker order, but only paths that actually exist in previews.
+                ordered = [p for p in selected if p in previews]
+                # Append every remaining candidate so nothing is dropped from deep analysis.
+                for p in previews:
+                    if p not in ordered:
+                        ordered.append(p)
+                return ordered
         except Exception:
-            # Fallback to original keyword-based selection
-            return list(previews.keys())[:self.STAGE2_MAX_FILES]
+            # Fallback to original keyword-based ordering — still covers all candidates.
+            return list(previews.keys())
 
     # ── LLM call ──────────────────────────────────────────────────────────────
+
+    def _build_batches(self, file_contents: Dict[str, str]) -> List[str]:
+        """Split files into combined-source batches under MAX_BATCH_CHARS."""
+        batches: List[str] = []
+        current: List[str] = []
+        current_size = 0
+        for path, content in file_contents.items():
+            truncated = smart_truncate(content, self.MAX_LINES_PER_FILE, mode="capability")
+            block = f"=== FILE: {path} ===\n{truncated}"
+            # A single oversized file is truncated and placed in its own batch.
+            if len(block) > self.MAX_BATCH_CHARS:
+                block = block[: self.MAX_BATCH_CHARS] + "\n...(truncated)"
+            if current and current_size + len(block) > self.MAX_BATCH_CHARS:
+                batches.append("\n\n".join(current))
+                current = []
+                current_size = 0
+            current.append(block)
+            current_size += len(block)
+        if current:
+            batches.append("\n\n".join(current))
+        return batches
+
+    async def _call_llm_batched(self, file_contents: Dict[str, str]) -> Tuple[list, str, int]:
+        """Run the deep capability LLM over all files, splitting into batches as needed."""
+        if not file_contents:
+            return [], "", 0
+
+        batches = self._build_batches(file_contents)
+        results = await asyncio.gather(
+            *[self._call_llm(b) for b in batches],
+            return_exceptions=True,
+        )
+
+        all_caps: list = []
+        summaries: List[str] = []
+        seen = set()
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            caps, summary = r
+            for cap in caps or []:
+                # Dedupe identical capabilities reported across batches.
+                key = (cap.get("category", "other"), (cap.get("name") or "").strip().lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                all_caps.append(cap)
+            if summary:
+                summaries.append(summary)
+
+        # One coherent overall summary. For multi-batch repos the partial summaries
+        # are re-synthesized into a single ≤500-char overview instead of concatenated.
+        if len(summaries) <= 1:
+            final_summary = summaries[0] if summaries else ""
+        else:
+            final_summary = await self._synthesize_summary(summaries)
+
+        return all_caps, final_summary, len(batches)
+
+    async def _synthesize_summary(self, summaries: List[str]) -> str:
+        """Merge partial per-batch summaries into one coherent overall summary (≤500 chars)."""
+        joined = "\n".join(f"- {s}" for s in summaries)
+        if self.lang == "en":
+            prompt = (
+                "Merge the following partial summaries of one project into a single coherent "
+                "overall summary of what the project/agent does (purpose, main workflow, scope). "
+                "Do NOT list capabilities. Length MUST be ≤500 characters.\n\n" + joined
+            )
+            sys_content = "You summarize software projects concisely. Output plain text only."
+        else:
+            prompt = (
+                "下面是对同一个项目的多段局部总结，请合并成一段连贯的「总体功能」总结，"
+                "说明该项目/Agent 的用途、主要工作流程与作用范围。不要罗列能力清单，字数必须小于等于 500 字。\n\n" + joined
+            )
+            sys_content = "你负责简洁地总结软件项目，只输出纯文本。"
+
+        payload = {
+            "model": self.QWEN_TURBO_MODEL,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": sys_content},
+                {"role": "user",   "content": prompt},
+            ],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(
+                    f"{self.QWEN_BASE}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.qwen_key}", "Content-Type": "application/json"},
+                    json=payload,
+                )
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"].strip()
+        except Exception:
+            # Fallback: concatenate; the renderer caps length at 500 chars.
+            return " ".join(summaries)
 
     async def _call_llm(self, combined_source: str):
         sys_prompt = SYSTEM_PROMPT
@@ -303,7 +396,7 @@ Return in JSON format with only the file path list:
 
     # ── Build result ──────────────────────────────────────────────────────────
 
-    def _build_result(self, raw_caps: list, summary: str, branch: str, files_scanned: int) -> dict:
+    def _build_result(self, raw_caps: list, summary: str, branch: str, files_scanned: int, batches: int = 1) -> dict:
         # Group by category
         grouped: Dict[str, list] = {}
         for cap in raw_caps:
@@ -391,12 +484,13 @@ Return in JSON format with only the file path list:
 
         score = max(0, min(100, score))
 
-        # Capability summary card
-        if summary:
+        # ── Capability summary card: overview + top-10 most sensitive ─────────
+        summary_html = self._render_summary_card(summary, raw_caps, branch, en)
+        if summary_html:
             findings.insert(0, {
                 "type":    "POSITIVE",
                 "title":   "📋 Capability Summary" if en else "📋 能力摘要",
-                "detail":  f'<div style="color:#374151;line-height:1.6;">{_esc(summary)}</div>',
+                "detail":  summary_html,
                 "is_html": True,
             })
 
@@ -477,6 +571,7 @@ Return in JSON format with only the file path list:
                 "medium_impact":   med_count,
                 "low_impact":      low_count,
                 "llm_model":       self.QWEN_MODEL,
+                "llm_batches":     batches,
             },
         }
 
@@ -553,6 +648,23 @@ Return in JSON format with only the file path list:
         # Sort by score descending, take top N
         scored.sort(key=lambda x: -x[0])
         return [f for _, f in scored[:self.STAGE1_MAX_CANDIDATES]]
+
+    def _render_summary_card(self, summary: str, raw_caps: list, branch: str, en: bool) -> str:
+        """Build the capability-summary card: a concise overall function summary (≤500 chars)."""
+        if not summary:
+            return ""
+
+        summary = summary.strip()
+        if len(summary) > 500:
+            summary = summary[:500].rstrip() + "…"
+
+        sec_title = "🧭 Overall Function" if en else "🧭 总体功能"
+        return (
+            f'<div style="line-height:1.6;">'
+            f'<div style="font-size:11px;font-weight:700;color:#1e293b;margin-bottom:3px;">{sec_title}</div>'
+            f'<div style="color:#374151;line-height:1.6;">{_esc(summary)}</div>'
+            f'</div>'
+        )
 
     def _make_file_link(self, filepath: str, line_no, branch: str) -> str:
         if not filepath:

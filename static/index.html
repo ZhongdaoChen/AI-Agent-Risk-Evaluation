@@ -451,7 +451,9 @@
       priorityRecommend: '建议',
       priorityOptional: '可选',
       whyNeeded: '📌 为什么需要',
+      precondition: '🔑 前提条件',
       howToImpl: '🛠️ 如何实施',
+      implExample: '📋 配置 / 代码示例',
       phaseMeta: {
         github:       { label: '声誉与活跃度' },
         depsdev:      { label: '依赖包健康度' },
@@ -554,7 +556,9 @@
       priorityRecommend: 'Recommended',
       priorityOptional: 'Optional',
       whyNeeded: '📌 Why it matters',
+      precondition: '🔑 Precondition',
       howToImpl: '🛠️ How to implement',
+      implExample: '📋 Config / code example',
       phaseMeta: {
         github:       { label: 'Reputation & Activity' },
         depsdev:      { label: 'Package Health' },
@@ -1069,7 +1073,10 @@ async function fetchSecurityControls(overall) {
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
-    renderSecurityControls(data.controls || []);
+    if (data.error || !Array.isArray(data.controls) || data.controls.length === 0) {
+      throw new Error(data.error || (currentLang === 'en' ? 'No recommendations returned' : '未返回任何建议'));
+    }
+    renderSecurityControls(data.controls);
   } catch (e) {
     const S = STRINGS[currentLang];
     document.getElementById('controlsLoading').innerHTML =
@@ -1077,6 +1084,13 @@ async function fetchSecurityControls(overall) {
     document.getElementById('controlsStatusBadge').textContent = S.controlsFailedBadge;
     document.getElementById('controlsStatusBadge').className = 'text-xs px-3 py-1 rounded-full bg-red-800 text-red-200';
   }
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function renderSecurityControls(controls) {
@@ -1149,6 +1163,11 @@ function renderSecurityControls(controls) {
                 <i id="chevron-${id}" class="fas fa-chevron-down text-gray-400 text-xs mt-1 flex-shrink-0 transition-transform ${isMust ? 'rotate-180' : ''}"></i>
               </button>
               <div id="${id}" class="${isMust ? '' : 'hidden'} px-4 pb-4 pt-0 space-y-3">
+                ${c.precondition && c.precondition.trim() ? `
+                <div class="bg-sky-50 rounded p-3" style="border-left: 3px solid #0ea5e9;">
+                  <div class="text-xs font-semibold text-sky-700 mb-1">${S.precondition}</div>
+                  <div class="text-xs text-sky-900 leading-relaxed">${c.precondition}</div>
+                </div>` : ''}
                 <div class="bg-amber-50 rounded p-3" style="border-left: 3px solid #f59e0b;">
                   <div class="text-xs font-semibold text-amber-700 mb-1">${S.whyNeeded}</div>
                   <div class="text-xs text-amber-800 leading-relaxed">${c.reason}</div>
@@ -1157,6 +1176,11 @@ function renderSecurityControls(controls) {
                   <div class="text-xs font-semibold text-indigo-700 mb-1">${S.howToImpl}</div>
                   <div class="text-xs text-indigo-900 leading-relaxed whitespace-pre-wrap">${c.implementation}</div>
                 </div>
+                ${c.example && c.example.trim() ? `
+                <div class="bg-gray-900 rounded p-3" style="border-left: 3px solid #10b981;">
+                  <div class="text-xs font-semibold text-emerald-400 mb-2">${S.implExample}</div>
+                  <pre class="text-xs text-gray-100 leading-relaxed overflow-x-auto"><code>${escapeHtml(c.example)}</code></pre>
+                </div>` : ''}
               </div>
             </div>`;
           }).join('')}

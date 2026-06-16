@@ -266,10 +266,17 @@ Generate recommendations across exactly these 3 categories:
 
 Rules:
 - Every recommendation must reference a specific detected capability or guardrail finding ("Because this agent has X / lacks Y...")
-- Each item must include: title (≤8 words), reason (why, what could go wrong), implementation (≥3 concrete steps with examples), priority (MUST/RECOMMEND/OPTIONAL), category
+- Each item must include: title (≤8 words), precondition, reason (why, what could go wrong), implementation, example, priority (MUST/RECOMMEND/OPTIONAL), category
+- `precondition` must state the concrete condition under which this control is necessary, so teams whose environment doesn't meet it can safely skip the control. Example: "Restrict file operation permissions" → precondition: "If the environment where the agent runs contains other sensitive files". If a control always applies regardless of environment, set precondition to "Applies unconditionally".
+- `implementation` must be a concrete, deploy-time runbook the team can follow as-is — NOT generic advice. It must:
+  · Say exactly WHERE to make the change (e.g. the agent's tool-registration code / the container Dockerfile / K8s SecurityContext / NetworkPolicy / an environment variable)
+  · Give the actual values or list (e.g. exactly which commands belong on the allowlist, which destructive flags to block)
+  · State how to VERIFY the control works (e.g. how to test that a command outside the allowlist is rejected)
+- `example` field: provide a ready-to-copy config or code snippet (e.g. an allowlist array, a wrapper function, a Dockerfile fragment, a K8s/seccomp config, iptables egress rules). Preserve newlines and indentation. If no code example genuinely applies, use an empty string.
+- Worked example (format reference only): Shell execution detected → implementation explains "add an allowlist check in the function that runs shell commands; permit only git/ls/cat, reject rm/curl/chmod and shell metacharacters", and `example` contains the corresponding allowlist-check code snippet.
 - At least 3 items per category; total ≥ 12
 - Output in English
-- Return valid JSON: {{"controls": [{{"category": "Capability Boundary Controls", "title": "...", "reason": "...", "implementation": "...", "priority": "MUST"}}]}}"""
+- Return valid JSON: {{"controls": [{{"category": "Capability Boundary Controls", "title": "...", "precondition": "...", "reason": "...", "implementation": "...", "example": "...", "priority": "MUST"}}]}}"""
 
     return f"""你是 adidas AppSec 团队的高级 AI 安全顾问。
 
@@ -312,10 +319,34 @@ Rules:
 
 规则：
 - 每条建议必须引用具体的能力或护栏发现项（"因为该 Agent 具备 X / 缺少 Y..."）
-- 每条包含：title（8字以内）、reason（为什么，可能触发什么后果）、implementation（≥3步骤，含示例）、priority（MUST/RECOMMEND/OPTIONAL）、category
+- 每条包含：title（8字以内）、precondition（前提条件）、reason、implementation、example、priority（MUST/RECOMMEND/OPTIONAL）、category
+- precondition 必须写明「在什么前提条件下，这条管控才是必要的」，以便不满足该前提的团队可以安全地跳过此条。例如："限制文件操作权限" → precondition："如果 Agent 运行的环境中存在其他敏感文件"。若该条管控在任何环境下都必须执行，则 precondition 填"无条件适用"。
+- implementation 必须是「部署该 Agent 时可直接照做的落地步骤」，而不是泛泛而谈。要求：
+  · 指明在哪里改（如：Agent 的工具注册/调用代码、容器 Dockerfile、K8s SecurityContext、网络策略 NetworkPolicy、环境变量）
+  · 给出具体取值或清单（如：命令白名单到底包含哪些命令、需要屏蔽哪些破坏性参数/元字符）
+  · 说明如何验证该管控已生效（如：如何测试一条不在白名单内的命令会被拒绝）
+- example 字段：给出一段可直接复制使用的配置或代码片段（如白名单数组、命令校验封装函数、Dockerfile 片段、K8s/seccomp 配置、iptables 出口规则等），保留换行与缩进；若该条确实无法给出代码示例，则用空字符串。
+- 范例（仅作格式参考）：检测到 Shell 执行能力 → implementation 说明"在 Agent 执行 shell 命令的封装函数处加入命令白名单校验，仅放行 git/ls/cat，拒绝 rm/curl/chmod 及 shell 元字符"，example 给出对应的白名单校验代码片段。
 - 每个维度至少 3 条，总计不少于 12 条
 - 全部中文输出
-- 返回合法 JSON：{{"controls": [{{"category": "能力边界管控", "title": "...", "reason": "...", "implementation": "...", "priority": "MUST"}}]}}"""
+- 返回合法 JSON：{{"controls": [{{"category": "能力边界管控", "title": "...", "precondition": "...", "reason": "...", "implementation": "...", "example": "...", "priority": "MUST"}}]}}"""
+
+
+def _extract_controls(data: dict) -> list:
+    """Tolerate LLM key variations; return a list of control items or []."""
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in ("controls", "recommendations", "items", "results", "data"):
+        val = data.get(key)
+        if isinstance(val, list):
+            return val
+    # Fallback: first list value in the dict
+    for val in data.values():
+        if isinstance(val, list) and val and isinstance(val[0], dict):
+            return val
+    return []
 
 
 @app.post("/api/security-controls")
@@ -326,10 +357,11 @@ async def security_controls(req: ControlsRequest):
     )
     prompt = _build_controls_prompt(req)
     sys_prompt = "You are an enterprise AI security advisor. Output strict JSON." if req.lang == "en" else "你是企业 AI 安全顾问，输出严格的 JSON。"
-    try:
+
+    async def _call_llm():
         resp = await asyncio.wait_for(
             client.chat.completions.create(
-                model="qwen-plus",
+                model="qwen-max",
                 temperature=0.3,
                 response_format={"type": "json_object"},
                 messages=[
@@ -337,13 +369,30 @@ async def security_controls(req: ControlsRequest):
                     {"role": "user",   "content": prompt},
                 ],
             ),
-            timeout=120.0,
+            timeout=150.0,
         )
-        raw = resp.choices[0].message.content
-        data = json.loads(raw)
-        return data
-    except asyncio.TimeoutError:
-        timeout_msg = "LLM response timed out, please try again later" if req.lang == "en" else "LLM 响应超时，请稍后重试"
-        return {"controls": [], "error": timeout_msg}
-    except Exception as e:
-        return {"controls": [], "error": str(e)[:200]}
+        return resp.choices[0].message.content
+
+    last_err: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            raw = await _call_llm()
+            data = json.loads(raw)
+            controls = _extract_controls(data)
+            if not controls:
+                last_err = ValueError("empty")
+                continue
+            return {"controls": controls}
+        except (asyncio.TimeoutError, json.JSONDecodeError) as e:
+            last_err = e
+            continue
+        except Exception as e:
+            return {"controls": [], "error": str(e)[:200]}
+
+    if isinstance(last_err, asyncio.TimeoutError):
+        msg = "LLM response timed out after retry, please try again later" if req.lang == "en" else "LLM 响应超时（已重试），请稍后重试"
+    elif isinstance(last_err, json.JSONDecodeError):
+        msg = f"LLM returned invalid JSON: {str(last_err)[:120]}" if req.lang == "en" else f"LLM 返回的 JSON 无法解析: {str(last_err)[:120]}"
+    else:
+        msg = "LLM returned no recommendations, please try again" if req.lang == "en" else "LLM 未返回任何建议，请重试"
+    return {"controls": [], "error": msg}

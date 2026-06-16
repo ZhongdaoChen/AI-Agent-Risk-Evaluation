@@ -159,8 +159,9 @@ class SkillAnalyzer:
     QWEN_BASE   = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL  = "qwen-plus"
 
-    MAX_FILES_TO_SCAN  = 20   # max skill files to send to LLM
-    MAX_LINES_PER_FILE = 300  # lines to read per skill file
+    MAX_LINES_PER_FILE = 300    # lines to read per skill file
+    MAX_BATCH_CHARS    = 12000  # max context chars per LLM call; larger sets are split into batches
+    MAX_CANDIDATE_FILES = 400   # safety ceiling on how many candidate files to fetch from GitHub
 
     def __init__(self, owner: str, repo: str, token: str = None, lang: str = "zh"):
         self.owner = owner
@@ -229,11 +230,8 @@ class SkillAnalyzer:
                 # Fall back to all fetched files if none pass the filter
                 skill_files_confirmed = file_contents
 
-            # Trim to max files
-            trimmed = dict(list(skill_files_confirmed.items())[:self.MAX_FILES_TO_SCAN])
-
-            # 4. Run LLM analysis
-            llm_result = await self._run_llm_analysis(trimmed, default_branch, en)
+            # 4. Run LLM analysis (all confirmed files, batched as needed)
+            llm_result = await self._run_llm_analysis(skill_files_confirmed, default_branch, en)
             return llm_result
 
     # ── File discovery ─────────────────────────────────────────────────────────
@@ -269,7 +267,9 @@ class SkillAnalyzer:
                 scored.append((score, f))
 
         scored.sort(key=lambda x: -x[0])
-        return [f for _, f in scored[:self.MAX_FILES_TO_SCAN * 3]]  # over-fetch, filter later
+        # No per-scan file cap: keep every candidate that contains skill keywords,
+        # bounded only by a safety ceiling to avoid pathological GitHub fan-out.
+        return [f for _, f in scored[:self.MAX_CANDIDATE_FILES]]
 
     def _contains_skill_definition(self, content: str) -> bool:
         for pattern in SKILL_DEF_PATTERNS:
@@ -298,6 +298,26 @@ class SkillAnalyzer:
 
     # ── LLM analysis ──────────────────────────────────────────────────────────
 
+    def _build_batches(self, file_contents: Dict[str, str]) -> List[Dict[str, str]]:
+        """Split files into batches whose combined context stays under MAX_BATCH_CHARS."""
+        batches: List[Dict[str, str]] = []
+        current: Dict[str, str] = {}
+        current_size = 0
+        for path, content in file_contents.items():
+            block = f"=== FILE: {path} ===\n{content}\n"
+            # A single oversized file is truncated and placed in its own slot.
+            if len(block) > self.MAX_BATCH_CHARS:
+                block = block[: self.MAX_BATCH_CHARS] + "\n...(truncated)"
+            if current and current_size + len(block) > self.MAX_BATCH_CHARS:
+                batches.append(current)
+                current = {}
+                current_size = 0
+            current[path] = block
+            current_size += len(block)
+        if current:
+            batches.append(current)
+        return batches
+
     async def _run_llm_analysis(
         self,
         file_contents: Dict[str, str],
@@ -307,15 +327,45 @@ class SkillAnalyzer:
         if not file_contents:
             return self._error_result("No skill file content to analyze", en)
 
-        # Build context block
-        blocks = []
-        for path, content in file_contents.items():
-            blocks.append(f"=== FILE: {path} ===\n{content}\n")
-        context = "\n".join(blocks)
+        batches = self._build_batches(file_contents)
+        results = await asyncio.gather(
+            *[self._call_llm_batch(b, en) for b in batches],
+            return_exceptions=True,
+        )
 
-        # Truncate total context to ~12k chars
-        if len(context) > 12000:
-            context = context[:12000] + "\n...(truncated)"
+        merged_findings: List[dict] = []
+        summary_parts: List[str] = []
+        score_delta_sum = 0
+        any_dirty = False
+        errors = 0
+
+        for r in results:
+            if isinstance(r, Exception) or not isinstance(r, dict):
+                errors += 1
+                continue
+            findings = r.get("malicious_findings", []) or []
+            merged_findings.extend(findings)
+            if findings or not r.get("clean", True):
+                any_dirty = True
+            if r.get("summary"):
+                summary_parts.append(r["summary"])
+            score_delta_sum += int(r.get("score_delta", 0) or 0)
+
+        if errors == len(batches):
+            return self._error_result("All LLM batch calls failed", en)
+
+        data = {
+            "malicious_findings": merged_findings,
+            "clean": (not any_dirty) and len(merged_findings) == 0,
+            "summary": " ".join(summary_parts),
+            "score_delta": max(-50, min(0, score_delta_sum)),
+            "_batches": len(batches),
+        }
+        return self._render_result(data, file_contents, branch, en)
+
+    async def _call_llm_batch(self, batch: Dict[str, str], en: bool) -> Optional[dict]:
+        """Run a single LLM call over one batch of pre-formatted file blocks."""
+        context = "\n".join(batch.values())
 
         user_prompt = (
             f"Analyze the following skill/tool files from repo `{self.owner}/{self.repo}` "
@@ -348,36 +398,35 @@ class SkillAnalyzer:
                 max_tokens=3000,
             )
             raw = resp.choices[0].message.content.strip()
-        except Exception as e:
-            return self._error_result(f"LLM call failed: {e}", en)
+        except Exception:
+            return None
 
-        return self._parse_llm_result(raw, file_contents, branch, en)
+        return self._parse_batch_json(raw)
 
-    # ── Result parsing ─────────────────────────────────────────────────────────
-
-    def _parse_llm_result(
-        self,
-        raw: str,
-        file_contents: Dict[str, str],
-        branch: str,
-        en: bool,
-    ) -> dict:
-        # Strip markdown code fences if present
+    def _parse_batch_json(self, raw: str) -> Optional[dict]:
+        """Extract a JSON object from a single LLM response, tolerating markdown fences."""
         clean = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.MULTILINE)
         clean = re.sub(r"\s*```$", "", clean.strip(), flags=re.MULTILINE)
-
         try:
-            data = json.loads(clean)
+            return json.loads(clean)
         except json.JSONDecodeError:
             m = re.search(r"\{.*\}", clean, re.DOTALL)
             if m:
                 try:
-                    data = json.loads(m.group(0))
+                    return json.loads(m.group(0))
                 except Exception:
-                    return self._error_result("Failed to parse LLM JSON response", en)
-            else:
-                return self._error_result("LLM returned non-JSON response", en)
+                    return None
+        return None
 
+    # ── Result rendering ───────────────────────────────────────────────────────
+
+    def _render_result(
+        self,
+        data: dict,
+        file_contents: Dict[str, str],
+        branch: str,
+        en: bool,
+    ) -> dict:
         mal_findings = data.get("malicious_findings", [])
         is_clean     = data.get("clean", len(mal_findings) == 0)
         summary      = data.get("summary", "")
@@ -488,6 +537,7 @@ class SkillAnalyzer:
                 "medium":                medium_count,
                 "clean":                 is_clean,
                 "llm_model":             self.QWEN_MODEL,
+                "llm_batches":           data.get("_batches", 1),
             },
         }
 
