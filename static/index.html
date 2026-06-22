@@ -104,6 +104,35 @@
   .dim-tooltip .tt-items li { padding: 2px 0; color: #cbd5e1; }
   .dim-tooltip .tt-items li::before { content: '• '; color: #6366f1; }
   .dim-tooltip .tt-weight { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); color: #64748b; font-size: 11px; }
+  .module-option { position: relative; }
+  .module-tooltip {
+    display: none;
+    position: absolute;
+    left: 50%;
+    top: calc(100% + 8px);
+    transform: translateX(-50%);
+    width: 220px;
+    background: #1e293b;
+    color: #e2e8f0;
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.5;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+    border: 1px solid rgba(99,102,241,0.25);
+    z-index: 80;
+    text-align: left;
+  }
+  .module-tooltip::after {
+    content: '';
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-bottom-color: #1e293b;
+  }
+  .module-option:hover .module-tooltip { display: block; }
 </style>
 </head>
 <body class="min-h-screen bg-gray-50">
@@ -136,6 +165,20 @@
             <li>云服务/邮件/外部 API 等</li>
           </ul>
           <div class="tt-weight">高分(75+)=低影响能力；低分(&lt;35)=几乎可完全控制宿主系统</div>
+        </div>
+      </span>
+
+      <span class="dim-tag" data-dim="skill">🔧 <span data-i18n="phaseMeta.skill.label">Skill安全质量</span>
+        <div class="dim-tooltip" id="tooltip-skill">
+          <div class="tt-title">🔧 Skill 安全质量（权重 12%）</div>
+          <div class="tt-desc">聚焦 Skill 本身的恶意风险，而非普通代码质量缺陷。</div>
+          <ul class="tt-items">
+            <li>恶意外传 / 凭证收集</li>
+            <li>混淆执行 / 远程脚本</li>
+            <li>后门 / 持久化 / 恶意链路</li>
+            <li>Medium / Low 默认不计分</li>
+          </ul>
+          <div class="tt-weight">只保留主观恶意的 High / Critical，并按文件聚合展示</div>
         </div>
       </span>
 
@@ -249,7 +292,7 @@
       <div class="rounded-xl overflow-hidden" style="background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12);">
         <button onclick="toggleAbout()" class="w-full flex items-center justify-between px-5 py-3 text-left">
           <span class="text-sm font-semibold text-indigo-200 flex items-center gap-2" id="scopeTitle" data-i18n="scopeTitle">
-            ⚠️ 能力边界说明：本工具仅做静态代码分析，目的是通过对 Agent 的能力解析，做部署前的风险评估，不是恶意代码扫描。<br>以下运行时安全问题无法发现，例如：
+            ⚠️ 能力边界说明：本工具仅做静态代码分析，目的是通过对 Agent 的能力解析，做部署前的风险评估，不是恶意代码扫描。以下运行时安全问题无法发现，例如：
           </span>
           <i id="aboutChevron" class="fas fa-chevron-up text-indigo-400 text-xs transition-transform"></i>
         </button>
@@ -312,6 +355,20 @@
       <button onclick="setExample('https://github.com/langchain-ai/langchain')" class="text-xs text-indigo-600 hover:underline">langchain</button>
       <button onclick="setExample('https://github.com/crewAIInc/crewAI')" class="text-xs text-indigo-600 hover:underline">crewAI</button>
       <button onclick="setExample('https://github.com/nousresearch/hermes-agent')" class="text-xs text-indigo-600 hover:underline">Hermes</button>
+    </div>
+
+    <div class="mt-4">
+      <div class="flex items-center justify-between gap-3 flex-wrap mb-2">
+        <div>
+          <div class="text-sm font-semibold text-gray-700" data-i18n="moduleSelectorTitle">Select analysis modules</div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button type="button" onclick="setAllModules(true)" class="text-xs text-indigo-600 hover:underline" data-i18n="selectAllModules">Select all</button>
+          <span class="text-gray-300 text-xs">|</span>
+          <button type="button" onclick="setAllModules(false)" class="text-xs text-indigo-600 hover:underline" data-i18n="clearAllModules">Clear all</button>
+        </div>
+      </div>
+      <div id="moduleSelectorGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2"></div>
     </div>
   </div>
 </div>
@@ -431,9 +488,14 @@
       controlsFailedMsg: '建议生成失败：',
       controlsFailedContact: '如需帮助请联系 Peter.Chen2',
       controlsBadge: (total, must) => `${total} 条建议 · ${must} 条必须`,
+      moduleSelectorTitle: '选择本次需要运行的扫描模块',
+      moduleSelectorHint: '',
+      selectAllModules: '全选',
+      clearAllModules: '清空',
+      noModulesSelected: '请至少选择一个扫描模块',
       catItems: (n) => `${n} 条`,
       catMust: (n) => `${n} 必须`,
-      scopeTitle: '⚠️ 能力边界说明：本工具仅做静态代码分析，目的是通过对 Agent 的能力解析，做部署前的风险评估，不是恶意代码扫描。<br>以下运行时安全问题无法发现，例如：',
+      scopeTitle: '⚠️ 能力边界说明：本工具仅做静态代码分析，目的是通过对 Agent 的能力解析，做部署前的风险评估，不是恶意代码扫描。以下运行时安全问题无法发现，例如：',
       scopeItems: [
         'System Prompt 从远程 URL 动态加载的内容',
         '工具调用链在运行时动态组合的行为',
@@ -455,15 +517,15 @@
       howToImpl: '🛠️ 如何实施',
       implExample: '📋 配置 / 代码示例',
       phaseMeta: {
-        github:       { label: '声誉与活跃度' },
-        depsdev:      { label: '依赖包健康度' },
-        code:         { label: 'Agent 能力分析' },
-        skill:        { label: 'Skill 恶意行为检测' },
-        deps:         { label: '依赖漏洞扫描' },
-        ai_safety:    { label: 'AI 安全护栏' },
-        privacy:      { label: '数据隐私' },
-        supply_chain: { label: '供应链完整性' },
-        runtime:      { label: '运行时隔离' },
+        github:       { label: '声誉与活跃度', intro: '结合 Stars、最近提交、贡献者和 SECURITY.md，判断维护活跃度与社区信任。' },
+        depsdev:      { label: '依赖包健康度', intro: '调用 deps.dev 交叉看包生态、依赖者规模与公告，补充仓库外部健康信号。' },
+        code:         { label: 'Agent 能力分析', intro: '识别 LLM 实际可触发的工具/skill 与参数控制度，用来估计真实爆炸半径。' },
+        skill:        { label: 'Skill 安全质量', intro: '基于 SkillSpector 聚合静态规则、AST、YARA 和语义扫描，评估单个 skill 风险。' },
+        deps:         { label: '依赖漏洞扫描', intro: '抽取直接依赖并查询 OSV 漏洞库，重点看可被公开利用的高危 CVE。' },
+        ai_safety:    { label: 'AI 安全护栏', intro: '检查是否存在人审、步数限制、工具白名单等机制来约束 LLM 决策环路。' },
+        privacy:      { label: '数据隐私', intro: '关注日志、遥测、持久化与外发路径，判断用户数据是否可能被过度收集。' },
+        supply_chain: { label: '供应链完整性', intro: '检查锁文件、版本固定、哈希校验和制品分发链，识别篡改与漂移风险。' },
+        runtime:      { label: '运行时隔离', intro: '评估容器、非 root、沙箱和宿主挂载，判断 agent 失控后的落地影响范围。' },
       },
       tooltips: {
         code: {
@@ -471,6 +533,12 @@
           desc: '枚举这个 AI Agent 能做什么（爆炸半径），而非找代码漏洞。由 LLM 语义分析。',
           items: ['终端/Shell 执行：−25分（最高风险）','代码解释器/REPL：−22分','文件系统写入/删除：−18分','数据库写入：−18分','云服务/邮件/外部 API 等'],
           weight: '高分(75+)=低影响能力；低分(&lt;35)=几乎可完全控制宿主系统'
+        },
+        skill: {
+          title: '🔧 Skill 安全质量（权重 12%）',
+          desc: '聚焦 Skill 本身的主观恶意风险，不把普通不严谨代码当作恶意。',
+          items: ['基于 SkillSpector 聚合静态规则、AST、YARA 与语义信号','只保留 High / Critical','只保留明显恶意：外传、后门、混淆执行、持久化等','按文件聚合展示 issues'],
+          weight: 'Medium / Low 默认不计分；普通缺校验、一般 CVE 不纳入最终评分'
         },
         ai_safety: {
           title: '🛡️ AI 安全护栏（权重 20%）',
@@ -536,6 +604,11 @@
       controlsFailedMsg: 'Failed to generate recommendations: ',
       controlsFailedContact: 'For help contact Peter.Chen2',
       controlsBadge: (total, must) => `${total} recommendations · ${must} required`,
+      moduleSelectorTitle: 'Select analysis modules',
+      moduleSelectorHint: '',
+      selectAllModules: 'Select all',
+      clearAllModules: 'Clear all',
+      noModulesSelected: 'Please select at least one analysis module',
       catItems: (n) => `${n} items`,
       catMust: (n) => `${n} required`,
       scopeTitle: '⚠️ Scope Limitation: This tool performs static code analysis, parses Agent capabilities, and provides deployment security control suggestions. The following runtime security issues cannot be detected, e.g.:',
@@ -560,15 +633,15 @@
       howToImpl: '🛠️ How to implement',
       implExample: '📋 Config / code example',
       phaseMeta: {
-        github:       { label: 'Reputation & Activity' },
-        depsdev:      { label: 'Package Health' },
-        code:         { label: 'Agent Capability Analysis' },
-        skill:        { label: 'Skill Malicious Behavior' },
-        deps:         { label: 'Dependency Vulnerabilities' },
-        ai_safety:    { label: 'AI Safety Guardrails' },
-        privacy:      { label: 'Data Privacy' },
-        supply_chain: { label: 'Supply Chain Integrity' },
-        runtime:      { label: 'Runtime Isolation' },
+        github:       { label: 'Reputation & Activity', intro: 'Combines stars, recent commits, contributors, and SECURITY.md to infer maintenance and trust.' },
+        depsdev:      { label: 'Package Health', intro: 'Uses deps.dev ecosystem signals, dependents, and advisories to add external package-health context.' },
+        code:         { label: 'Agent Capability Analysis', intro: 'Maps LLM-invocable tools plus parameter controllability to estimate real blast radius.' },
+        skill:        { label: 'Skill Security Quality', intro: 'Uses SkillSpector static rules, AST, YARA, and semantic checks to score per-skill risk.' },
+        deps:         { label: 'Dependency Vulnerabilities', intro: 'Extracts direct dependencies and queries OSV for known CVEs, prioritizing exploitable ones.' },
+        ai_safety:    { label: 'AI Safety Guardrails', intro: 'Checks whether human approval, limits, and tool gating constrain the LLM decision loop.' },
+        privacy:      { label: 'Data Privacy', intro: 'Looks at logging, telemetry, persistence, and outbound paths to assess data over-collection risk.' },
+        supply_chain: { label: 'Supply Chain Integrity', intro: 'Checks locks, pinning, hash verification, and artifact flow for tampering or drift risk.' },
+        runtime:      { label: 'Runtime Isolation', intro: 'Evaluates containers, non-root execution, sandboxes, and host mounts to bound impact.' },
       },
       tooltips: {
         code: {
@@ -576,6 +649,12 @@
           desc: 'Identifies all operations this AI agent can perform on the host system or external services — the "blast radius" if compromised.',
           items: ['Shell / terminal execution: −25pts (highest risk)','Code interpreter / REPL: −22pts','File system write / delete: −18pts','Database write: −18pts','Cloud services / email / external APIs, etc.'],
           weight: 'High score (75+) = low-impact capabilities; Low score (&lt;35) = near-full host system control'
+        },
+        skill: {
+          title: '🔧 Skill Security Quality (Weight 12%)',
+          desc: 'Focuses on intentionally malicious skill behavior, not ordinary coding mistakes.',
+          items: ['Built on SkillSpector static, AST, YARA, and semantic signals','Keeps only High / Critical findings','Keeps only malicious patterns such as exfiltration, backdoors, obfuscated execution, or persistence','Aggregates issues per file'],
+          weight: 'Medium / Low do not score by default; routine validation gaps and generic CVEs are excluded'
         },
         ai_safety: {
           title: '🛡️ AI Safety Guardrails (Weight 20%)',
@@ -640,7 +719,10 @@
     const S = STRINGS[currentLang];
     // Update PHASE_META labels
     Object.keys(PHASE_META).forEach(k => {
-      if (S.phaseMeta[k]) PHASE_META[k].label = S.phaseMeta[k].label;
+      if (S.phaseMeta[k]) {
+        PHASE_META[k].label = S.phaseMeta[k].label;
+        PHASE_META[k].intro = S.phaseMeta[k].intro || '';
+      }
     });
     // Update static elements by data-i18n attribute
     document.querySelectorAll('[data-i18n]').forEach(el => {
@@ -651,6 +733,7 @@
     // Update scope items text
     const items = document.querySelectorAll('#scopeItemsList li span:last-child');
     S.scopeItems.forEach((text, i) => { if (items[i]) items[i].textContent = text; });
+    renderModuleSelector();
     // Rebuild tooltip HTML from STRINGS
     rebuildTooltips();
     // Update progress items already rendered
@@ -677,15 +760,15 @@
   }
 
   const PHASE_META = {
-    github:       { icon: '⭐', label: '声誉与活跃度',         fullWidth: false },
-    depsdev:      { icon: '🌐', label: '依赖包健康度',       fullWidth: false },
-    code:         { icon: '🤖', label: 'Agent 能力分析',      fullWidth: true  },
-    skill:        { icon: '🔧', label: 'Skill 恶意行为检测',   fullWidth: true  },
-    deps:         { icon: '📦', label: '依赖漏洞扫描', fullWidth: true  },
-    ai_safety:    { icon: '🛡️', label: 'AI 安全护栏',          fullWidth: true  },
-    privacy:      { icon: '🔒', label: '数据隐私',                  fullWidth: false },
-    supply_chain: { icon: '⛓️', label: '供应链完整性',        fullWidth: false },
-    runtime:      { icon: '🐳', label: '运行时隔离',             fullWidth: false },
+    github:       { icon: '⭐', label: '声誉与活跃度', intro: '', fullWidth: false },
+    depsdev:      { icon: '🌐', label: '依赖包健康度', intro: '', fullWidth: false },
+    code:         { icon: '🤖', label: 'Agent 能力分析', intro: '', fullWidth: true  },
+    skill:        { icon: '🔧', label: 'Skill 安全质量', intro: '', fullWidth: true  },
+    deps:         { icon: '📦', label: '依赖漏洞扫描', intro: '', fullWidth: true  },
+    ai_safety:    { icon: '🛡️', label: 'AI 安全护栏', intro: '', fullWidth: true  },
+    privacy:      { icon: '🔒', label: '数据隐私', intro: '', fullWidth: false },
+    supply_chain: { icon: '⛓️', label: '供应链完整性', intro: '', fullWidth: false },
+    runtime:      { icon: '🐳', label: '运行时隔离', intro: '', fullWidth: false },
   };
 
 // Desired display order
@@ -693,6 +776,7 @@ const PHASE_ORDER = ['code', 'skill', 'ai_safety', 'github', 'depsdev', 'deps', 
 
 let allResults = {};
 let currentTarget = '';
+let selectedPhaseKeys = PHASE_ORDER.slice();
 
 function setExample(url) {
   document.getElementById('urlInput').value = url;
@@ -702,10 +786,52 @@ function toggleToken() {
   sec.classList.toggle('hidden');
 }
 
+function renderModuleSelector() {
+  const grid = document.getElementById('moduleSelectorGrid');
+  if (!grid) return;
+
+  const checked = new Set(
+    Array.from(grid.querySelectorAll('input[type="checkbox"]:checked')).map(el => el.value)
+  );
+  const keepExisting = checked.size > 0;
+
+  grid.innerHTML = PHASE_ORDER.map(key => {
+    const meta = PHASE_META[key];
+    const isChecked = keepExisting ? checked.has(key) : true;
+    const intro = meta.intro || '';
+    return `
+      <label class="module-option flex items-center gap-3 border border-gray-200 rounded-lg px-3 py-2 bg-white hover:border-indigo-300 hover:bg-indigo-50 transition-colors cursor-pointer">
+        <input type="checkbox" class="module-checkbox rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" value="${key}" ${isChecked ? 'checked' : ''}>
+        <span class="text-base">${meta.icon}</span>
+        <span class="text-sm text-gray-700">${escHtml(meta.label)}</span>
+        <div class="module-tooltip">${escHtml(intro)}</div>
+      </label>
+    `;
+  }).join('');
+}
+
+function getSelectedModules() {
+  return Array.from(document.querySelectorAll('.module-checkbox:checked')).map(el => el.value);
+}
+
+function setAllModules(checked) {
+  document.querySelectorAll('.module-checkbox').forEach(el => {
+    el.checked = checked;
+  });
+}
+
+function shouldGenerateSecurityControls(selectedModules) {
+  return selectedModules.some(key => ['code', 'ai_safety', 'runtime'].includes(key));
+}
+
 function startAnalysis() {
+  const S = STRINGS[currentLang];
   const url = document.getElementById('urlInput').value.trim();
   if (!url) { alert('Please enter a GitHub repository URL'); return; }
   const token = document.getElementById('tokenInput').value.trim();
+  const selectedModules = getSelectedModules();
+  if (selectedModules.length === 0) { alert(S.noModulesSelected); return; }
+  selectedPhaseKeys = selectedModules;
 
   // Reset UI
   allResults = {};
@@ -714,11 +840,17 @@ function startAnalysis() {
   document.getElementById('errorSection').classList.add('hidden');
   document.getElementById('progressItems').innerHTML = '';
   document.getElementById('dimensionGrid').innerHTML = '';
+  document.getElementById('securityControlsCard').classList.add('hidden');
+  document.getElementById('controlsContent').classList.add('hidden');
+  document.getElementById('controlsContent').innerHTML = '';
+  document.getElementById('controlsLoading').classList.remove('hidden');
+  document.getElementById('controlsStatusBadge').textContent = S.controlsGenerating;
+  document.getElementById('controlsStatusBadge').className = 'text-xs px-3 py-1 rounded-full bg-indigo-700 text-indigo-200';
   document.getElementById('analyzeBtn').disabled = true;
-  document.getElementById('analyzeBtn').innerHTML = '<i class="fas fa-circle-notch spinner"></i> Analyzing...';
+  document.getElementById('analyzeBtn').innerHTML = S.analyzingBtn;
 
   // Init progress items in PHASE_ORDER
-  PHASE_ORDER.forEach(key => {
+  selectedModules.forEach(key => {
     const meta = PHASE_META[key];
     if (!meta) return;
     const el = document.createElement('div');
@@ -734,6 +866,7 @@ function startAnalysis() {
 
   const params = new URLSearchParams({ url, lang: currentLang });
   if (token) params.set('token', token);
+  params.set('modules', selectedModules.join(','));
 
   const es = new EventSource(`/api/analyze?${params}`);
 
@@ -743,14 +876,14 @@ function startAnalysis() {
     if (data.type === 'complete' || data.type === 'error') {
       es.close();
       document.getElementById('analyzeBtn').disabled = false;
-      document.getElementById('analyzeBtn').innerHTML = '<i class="fas fa-search"></i> Analyze';
+      document.getElementById('analyzeBtn').innerHTML = `<i class="fas fa-search"></i> ${STRINGS[currentLang].analyzeBtn}`;
     }
   };
 
   es.onerror = () => {
     es.close();
     document.getElementById('analyzeBtn').disabled = false;
-    document.getElementById('analyzeBtn').innerHTML = '<i class="fas fa-search"></i> Analyze';
+    document.getElementById('analyzeBtn').innerHTML = `<i class="fas fa-search"></i> ${STRINGS[currentLang].analyzeBtn}`;
     showError('Connection lost. Please check if the server is running.');
   };
 }
@@ -791,7 +924,9 @@ function handleEvent(data) {
   if (data.type === 'complete') {
     document.getElementById('progressSection').classList.add('hidden');
     renderOverallScore(data.overall);
-    fetchSecurityControls(data.overall);
+    if (shouldGenerateSecurityControls(selectedPhaseKeys)) {
+      fetchSecurityControls(data.overall);
+    }
   }
 }
 
@@ -1016,6 +1151,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('urlInput').addEventListener('keydown', e => {
     if (e.key === 'Enter') startAnalysis();
   });
+  applyLang();
   // Check if a default token is configured
   fetch('/api/config').then(r => r.json()).then(cfg => {
     if (cfg.has_default_token) {

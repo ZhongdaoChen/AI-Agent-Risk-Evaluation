@@ -36,6 +36,18 @@ from translations import translate_result
 
 app = FastAPI(title="AI Agent Risk Evaluator", version="1.0.0")
 
+ANALYZER_ORDER = [
+    "github",
+    "depsdev",
+    "code",
+    "deps",
+    "ai_safety",
+    "skill",
+    "privacy",
+    "supply_chain",
+    "runtime",
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -102,7 +114,17 @@ def calculate_overall(results: dict) -> dict:
     return {"score": final, "risk_level": risk, "emoji": emoji, "label": label}
 
 
-async def stream_analysis(url: str, token: Optional[str], lang: str = "zh") -> AsyncGenerator[str, None]:
+def normalize_selected_modules(modules: Optional[str]) -> list[str]:
+    if not modules:
+        return ANALYZER_ORDER[:]
+
+    requested = [m.strip() for m in modules.split(",") if m.strip()]
+    selected = [key for key in ANALYZER_ORDER if key in requested]
+    return selected
+
+
+async def stream_analysis(url: str, token: Optional[str], lang: str = "zh",
+                          selected_modules: Optional[list[str]] = None) -> AsyncGenerator[str, None]:
     def sse(data: dict) -> str:
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -125,6 +147,8 @@ async def stream_analysis(url: str, token: Optional[str], lang: str = "zh") -> A
         ("supply_chain",  "⛓️ Supply Chain Integrity",           SupplyChainAnalyzer(owner, repo, token)),
         ("runtime",       "🐳 Runtime Isolation",                RuntimeAnalyzer(owner, repo, token)),
     ]
+    if selected_modules is not None:
+        analyzers = [item for item in analyzers if item[0] in set(selected_modules)]
 
     # Non-LLM analyzers that need translation
     NON_LLM = {"github", "depsdev", "deps", "privacy", "supply_chain", "runtime"}
@@ -183,10 +207,19 @@ async def analyze(
     url: str = Query(..., description="GitHub repository URL"),
     token: Optional[str] = Query(None, description="GitHub PAT (optional, increases rate limit)"),
     lang: str = Query("zh", description="Output language: 'zh' (default) or 'en'"),
+    modules: Optional[str] = Query(None, description="Comma-separated analyzer keys to run"),
 ):
     effective_token = token or DEFAULT_TOKEN or None
+    selected_modules = normalize_selected_modules(modules)
+    if not selected_modules:
+        return StreamingResponse(
+            iter([
+                f"data: {json.dumps({'type': 'error', 'message': 'No valid analysis modules selected'}, ensure_ascii=False)}\n\n"
+            ]),
+            media_type="text/event-stream",
+        )
     return StreamingResponse(
-        stream_analysis(url, effective_token, lang=lang),
+        stream_analysis(url, effective_token, lang=lang, selected_modules=selected_modules),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
