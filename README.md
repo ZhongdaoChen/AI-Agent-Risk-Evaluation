@@ -20,7 +20,7 @@ The web UI supports **module-level selection**, so users can choose which analys
 ## Current analysis modules
 
 1. **Agent Capability Analysis**  
-   Identifies what the LLM can actually trigger, estimates blast radius, and distinguishes LLM-invocable capabilities from deterministic code.
+   Identifies what the LLM can actually trigger, estimates blast radius only for capabilities whose parameters or targets are dynamically controlled by LLM output, and separates fixed/constrained or deterministic capabilities from scored blast radius.
 
 2. **Skill Security Quality**  
    Uses **SkillSpector** to scan skills/tools, then post-filters the results to keep only **subjectively malicious High/Critical findings**. Routine coding sloppiness, generic CVEs, and non-malicious validation gaps are excluded.
@@ -55,6 +55,7 @@ For agent capability analysis, the platform does **not** treat all code equally.
 - tools/skills the LLM can invoke directly
 - operations reachable from those tools
 - how much of the dangerous action the model can control
+- whether key parameters or targets are fixed/constrained instead of dynamically produced by the model
 
 This keeps the blast-radius score aligned with the real AI threat model, instead of overcounting deterministic code paths.
 

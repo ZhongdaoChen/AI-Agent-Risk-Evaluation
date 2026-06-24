@@ -43,8 +43,10 @@ THREAT MODEL — read carefully, this defines what matters:
 The risk we care about comes from the NON-DETERMINISM of the LLM. An attacker who manipulates the model's output (via prompt injection, jailbreak, poisoned content) can make the agent autonomously CALL ITS TOOLS to do unexpected, harmful things. Therefore a capability is security-relevant ONLY if the LLM can actually trigger it.
 
 You must distinguish two kinds of capabilities:
-  • LLM-INVOCABLE: the capability is exposed to the model as a callable tool/function (e.g. @tool / function_tool decorator, OpenAI function-calling schema, MCP inputSchema, a tool passed in tools=[...] / functions=[...], LangChain Tool()/StructuredTool, an agent action/executor the model selects), OR it is reached from inside such a tool's implementation. These are the real blast radius.
+  • LLM-INVOCABLE: the capability is exposed to the model as a callable tool/function (e.g. @tool / function_tool decorator, OpenAI function-calling schema, MCP inputSchema, a tool passed in tools=[...] / functions=[...], LangChain Tool()/StructuredTool, an agent action/executor the model selects), OR it is reached from inside such a tool's implementation.
   • DETERMINISTIC: fixed-code paths the LLM cannot steer — startup/config code, deploy scripts, business logic, framework/infra plumbing, CLI utilities run by humans. List them but mark them as NOT llm-invocable; they do NOT count toward AI blast radius.
+
+Only LLM-invocable capabilities with high/medium controllability count toward AI blast radius. If a tool is LLM-invocable but all key parameters/targets are hardcoded, validated, or constrained to a safe enum/allowlist the LLM cannot expand, set controllability="low"; it should be listed for transparency but excluded from blast-radius scoring.
 
 IMPORTANT — STANDALONE SKILLS / TOOLS LIBRARIES:
 A repo can be a *collection of skills/tools/plugins/MCP tools* with NO LLM driver of its own. This IS a tool surface: those skills are meant to be loaded into an agent and invoked by an LLM. In that case set has_tool_surface=true (even though is_ai_agent may be false), set project_type="skills_library" (or "tool"), and mark the skills as llm_invocable=true. The blast radius is exactly what an LLM could do by calling them. Do NOT declare such a repo "not applicable".
@@ -81,7 +83,7 @@ Return ONLY valid JSON — no markdown, no text outside the JSON:
 CONTROLLABILITY GUIDE (how much of the dangerous operation the LLM's output controls):
 - "high":   the model supplies the key parameter/target — e.g. the shell command string, the file path, the SQL, the email recipient/body, the URL
 - "medium": the model chooses among constrained options or supplies partial parameters
-- "low":    parameters are hardcoded/validated/whitelisted; the model only triggers a fixed action
+- "low":    parameters are hardcoded/validated/whitelisted; the model only triggers a fixed action. These are fixed/constrained capabilities and do NOT count toward blast-radius scoring.
 
 CATEGORIES (use exactly these strings):
 - "terminal"        — can run shell/bash/cmd commands
@@ -103,7 +105,7 @@ CATEGORIES (use exactly these strings):
 SEVERITY GUIDE:
 - HIGH:   The agent can cause irreversible or high-impact side effects (delete files, send emails, run shell commands, modify databases, control computer)
 - MEDIUM: The agent reads data, makes external calls, or browses the web — lower impact but still noteworthy
-- LOW:    Informational — the agent uses memory, search, or other benign capabilities
+- LOW:    Informational — the agent uses memory, search, other benign capabilities, or fixed/constrained actions whose parameters are not dynamically controlled by the LLM
 
 RULES:
 - Report each DISTINCT capability once — do not duplicate
@@ -111,6 +113,7 @@ RULES:
 - Be specific: "reads files from any path" is better than "reads files"
 - Set llm_invocable=true ONLY when there is evidence the model can reach it (exposed tool, or code inside a tool). When unsure and it is plainly fixed infra/deploy/config code, set llm_invocable=false
 - If a tool is defined but appears disabled or gated, note that in the description
+- Do not inflate severity for fixed/constrained actions. If the LLM can only trigger a fixed action with no dynamic control over targets/parameters, use controllability="low" even when the deterministic action itself writes files or calls external APIs.
 - Include capabilities from README/docs if the code implements them
 - Do NOT report general LLM API calls (to OpenAI/Anthropic/Qwen etc.) as "external_api" unless the agent TOOLS explicitly call external services beyond the LLM provider
 - Focus on what the AGENT does, not what its dependencies do internally
@@ -467,20 +470,29 @@ Return in JSON format with only the file path list, most relevant first:
             return self._not_applicable_result(summary, raw_caps, agent_info, branch,
                                                 files_scanned, batches, en)
 
-        # ── A: only LLM-invocable capabilities count toward AI blast radius;
-        #        deterministic fixed-code capabilities are shown but not scored. ──
-        reachable     = [c for c in raw_caps if c.get("llm_invocable", True)]
+        # ── A: only LLM-invocable capabilities whose parameters/targets are
+        #        dynamically controlled by the LLM count toward AI blast radius.
+        #        Fixed/constrained tools are shown for transparency but not scored. ──
+        reachable = [c for c in raw_caps if c.get("llm_invocable", True)]
+        controlled = [
+            c for c in reachable
+            if (c.get("controllability") or "").lower() != "low"
+        ]
+        fixed_constrained = [
+            c for c in reachable
+            if (c.get("controllability") or "").lower() == "low"
+        ]
         deterministic = [c for c in raw_caps if not c.get("llm_invocable", True)]
 
-        # Group LLM-invocable capabilities by category
+        # Group LLM-controlled capabilities by category
         grouped: Dict[str, list] = {}
-        for cap in reachable:
+        for cap in controlled:
             cat = cap.get("category", "other")
             grouped.setdefault(cat, []).append(cap)
 
         # Score: start at 100, deduct by capability risk weights
         score = 100
-        score_steps = [("Baseline (no LLM-invocable capabilities)" if en else "基准分（无 LLM 可触发能力）", 100, 100)]
+        score_steps = [("Baseline (no LLM-controlled capabilities)" if en else "基准分（无 LLM 动态管控能力）", 100, 100)]
         findings = []
 
         # Category severity order for display
@@ -578,6 +590,47 @@ Return in JSON format with only the file path list, most relevant first:
 
         score = max(0, min(100, score))
 
+        # ── LLM-triggered but fixed/constrained capabilities — informational only ──
+        if fixed_constrained:
+            fixed_rows = []
+            for cap in fixed_constrained:
+                cat   = cap.get("category", "other")
+                meta  = CATEGORY_RISK.get(cat, CATEGORY_RISK["other"])
+                name  = cap.get("name", "Unknown capability")
+                desc  = cap.get("description", "")
+                why   = cap.get("invocation_evidence", "")
+                evidence = cap.get("evidence", "")
+                file_link = self._make_file_link(cap.get("file", ""), cap.get("line"), branch)
+                evidence_html = ""
+                if evidence:
+                    evidence_html = (
+                        f'<div style="font-family:monospace;font-size:10px;color:#64748b;'
+                        f'background:#f8fafc;border:1px solid #e2e8f0;border-radius:4px;'
+                        f'padding:4px 6px;margin-top:3px;white-space:pre-wrap;word-break:break-all;">'
+                        f'{_esc(evidence[:180])}</div>'
+                    )
+                fixed_rows.append(
+                    f'<div style="padding:5px 0;border-bottom:1px solid #f1f5f9;">'
+                    f'<div style="font-weight:600;color:#475569;">{meta["icon"]} {_esc(name)}</div>'
+                    f'<div style="color:#64748b;font-size:11px;line-height:1.5;margin-top:2px;">{_esc(desc)}</div>'
+                    + (f'<div style="color:#94a3b8;font-size:10px;margin-top:1px;">🎮 {("参数固定/受限，LLM 只能触发固定动作" if not en else "fixed/constrained; LLM only triggers a fixed action")}: {_esc(why)}</div>' if why else "")
+                    + (f'<div style="color:#94a3b8;font-size:10px;">📍 {file_link}</div>' if file_link else "")
+                    + evidence_html
+                    + '</div>'
+                )
+            fixed_title = (
+                f'🎮 {len(fixed_constrained)} Fixed/constrained LLM-triggered capabilities — excluded from blast radius (click to expand)'
+                if en else
+                f'🎮 {len(fixed_constrained)} 项参数固定/受限的 LLM 可触发能力 — 不计入爆炸半径（点击展开）'
+            )
+            findings.append({
+                "type":    "POSITIVE",
+                "title":   fixed_title,
+                "detail":  f'<div style="line-height:1.5;">{"".join(fixed_rows)}</div>',
+                "is_html": True,
+                "control_relevant": False,
+            })
+
         # ── Deterministic capabilities (not LLM-invocable) — informational only ──
         if deterministic:
             det_rows = []
@@ -606,11 +659,12 @@ Return in JSON format with only the file path list, most relevant first:
                 "title":   det_title,
                 "detail":  f'<div style="line-height:1.5;">{"".join(det_rows)}</div>',
                 "is_html": True,
+                "control_relevant": False,
             })
 
         # NOTE: the capability summary card is inserted LAST (below) so it renders
-        # first; the deterministic section above is collapsible and sorts before
-        # the LLM-invocable capabilities.
+        # first; the fixed/deterministic sections above are collapsible and sort
+        # before the dynamically LLM-controlled capabilities.
 
         # Score breakdown
         criteria_rows = "".join([
@@ -624,7 +678,7 @@ Return in JSON format with only the file path list, most relevant first:
         if en:
             score_html = f"""<div style="font-size:11px;">
   <div style="margin-bottom:6px;color:#6b7280;">
-    Score reflects <b>blast radius</b>: stronger capabilities = lower score.<br/>
+    Score reflects <b>LLM-controlled blast radius</b>: only capabilities whose parameters/targets are dynamically controlled by the LLM are counted. Fixed/constrained and deterministic capabilities are excluded.<br/>
     Terminal/Shell <b>−25</b> · Code Exec/Computer Control <b>−22</b> · File Write/DB Write <b>−18</b> ·
     Email/Cloud <b>−15</b> · Credentials <b>−10</b> · External API/Browser <b>−12</b> · File Read <b>−8</b> · Search <b>−5</b>
   </div>
@@ -645,7 +699,7 @@ Return in JSON format with only the file path list, most relevant first:
         else:
             score_html = f"""<div style="font-size:11px;">
   <div style="margin-bottom:6px;color:#6b7280;">
-    分数反映<b>爆炸半径</b>：检测到的能力越强，分数越低。<br/>
+    分数反映<b>LLM 动态管控的爆炸半径</b>：只有参数/目标由 LLM 输出动态控制的能力才计分。参数固定/受限能力和确定性能力均排除。<br/>
     终端/Shell <b>−25</b> · 代码执行/计算机控制 <b>−22</b> · 文件写入/数据库写入 <b>−18</b> ·
     邮件/云服务 <b>−15</b> · 凭证访问 <b>−10</b> · 外部API/浏览器 <b>−12</b> · 文件读取 <b>−8</b> · 搜索 <b>−5</b>
   </div>
@@ -702,11 +756,12 @@ Return in JSON format with only the file path list, most relevant first:
             })
 
         det_count = len(deterministic)
-        total_caps = high_count + med_count + low_count
+        fixed_count = len(fixed_constrained)
+        controlled_count = high_count + med_count + low_count
         summary_str = (
-            f"{total_caps} LLM-invocable capabilities · {high_count} high-impact · {det_count} deterministic (excluded) · {files_scanned} files scanned"
+            f"{controlled_count} LLM-controlled capabilities · {high_count} high-impact · {fixed_count} fixed/constrained (excluded) · {det_count} deterministic (excluded) · {files_scanned} files scanned"
             if en else
-            f"{total_caps} 项 LLM 可触发能力 · {high_count} 高影响 · {det_count} 项确定性能力（已排除）· {files_scanned} 个文件已扫描"
+            f"{controlled_count} 项 LLM 动态管控能力 · {high_count} 高影响 · {fixed_count} 项参数固定/受限（已排除）· {det_count} 项确定性能力（已排除）· {files_scanned} 个文件已扫描"
         )
         return {
             "score":      score,
@@ -715,8 +770,10 @@ Return in JSON format with only the file path list, most relevant first:
             "findings":   findings,
             "metrics": {
                 "files_scanned":   files_scanned,
-                "total_capabilities": total_caps,
-                "llm_invocable_capabilities": total_caps,
+                "total_capabilities": len(raw_caps),
+                "llm_invocable_capabilities": len(reachable),
+                "llm_controlled_capabilities": controlled_count,
+                "fixed_constrained_capabilities": fixed_count,
                 "deterministic_capabilities": det_count,
                 "high_impact":     high_count,
                 "medium_impact":   med_count,
@@ -909,4 +966,3 @@ Return in JSON format with only the file path list, most relevant first:
         if score >= 55: return "MEDIUM"
         if score >= 35: return "HIGH"
         return "CRITICAL"
-

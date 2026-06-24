@@ -329,7 +329,7 @@ def _build_controls_prompt(req: ControlsRequest) -> str:
         findings = result.get("findings", [])
         lines = []
         for f in findings[:max_items]:
-            if f.get("type") == "INFO":
+            if f.get("type") == "INFO" or f.get("control_relevant") is False:
                 continue
             lines.append(f"  [{f.get('type','?')}] {f.get('title','')}：{f.get('detail','')[:150]}")
         return "\n".join(lines) if lines else ("  No findings" if req.lang == "en" else "  无特殊发现")
