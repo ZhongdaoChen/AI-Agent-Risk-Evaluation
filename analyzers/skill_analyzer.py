@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import tempfile
 import zipfile
@@ -22,12 +23,15 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from openai import AsyncOpenAI
 
 
 class SkillAnalyzer:
     GITHUB_BASE = "https://api.github.com"
     QWEN_OPENAI_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL = "qwen-plus"
+    INTENT_MODEL = "qwen-turbo"
+    FILE_CONTEXT_MAX_CHARS = 2000
     FILE_RISK_RECOMMENDATION = {
         "LOW": "SAFE",
         "MEDIUM": "CAUTION",
@@ -58,7 +62,10 @@ class SkillAnalyzer:
         try:
             temp_root, repo_dir = await self._download_repo_snapshot()
             report = await self._run_skillspector(repo_dir)
-            return self._render_result(report, repo_dir)
+            filtered_issues = await self._select_malicious_issues(report, repo_dir)
+            if self.lang != "en":
+                filtered_issues = await self._localize_issues_for_display(filtered_issues)
+            return self._render_result(report, repo_dir, filtered_issues)
         except Exception as e:
             return self._error_result(str(e))
         finally:
@@ -140,12 +147,173 @@ class SkillAnalyzer:
         finally:
             shutil.rmtree(report_dir, ignore_errors=True)
 
-    def _render_result(self, report: dict[str, Any], repo_dir: str) -> dict:
+    async def _select_malicious_issues(self, report: dict[str, Any], repo_dir: str) -> list[dict[str, Any]]:
+        raw_issues = report.get("issues", []) or []
+        candidates = [
+            issue for issue in raw_issues
+            if str(issue.get("severity", "LOW")).upper() in {"HIGH", "CRITICAL"}
+        ]
+        if not candidates:
+            return []
+
+        qwen_key = os.getenv("QWEN_API_KEY", "")
+        if not qwen_key:
+            return self._filter_malicious_issues_heuristic(candidates)
+
+        prompt_items = []
+        for idx, issue in enumerate(candidates):
+            location = issue.get("location") or {}
+            file_path = str(location.get("file", ""))
+            prompt_items.append({
+                "index": idx,
+                "rule_id": issue.get("id") or issue.get("rule_id"),
+                "category": issue.get("category"),
+                "severity": issue.get("severity"),
+                "file": file_path,
+                "finding": issue.get("finding"),
+                "explanation": issue.get("explanation") or issue.get("message"),
+                "code_snippet": issue.get("code_snippet"),
+                "file_excerpt": self._read_file_excerpt(repo_dir, file_path),
+            })
+
+        system_prompt = (
+            "You are a security reviewer for AI agent skills. "
+            "Your job is to decide whether each candidate finding shows SUBJECTIVE ATTACK INTENT, "
+            "not merely bad engineering or insufficient validation. "
+            "Keep a finding only when the skill appears to deliberately steal secrets, exfiltrate data, "
+            "execute hidden or remote payloads, establish persistence/backdoors, or perform sensitive actions "
+            "that are clearly unrelated to the skill's declared purpose. "
+            "Do NOT keep findings that are merely about missing validation, generic dangerous APIs, powerful but legitimate capabilities, "
+            "prompt-injection-like wording in docs/comments, ordinary dependency CVEs, or broad design concerns without clear malicious intent. "
+            "Purpose mismatch matters a lot: if a skill whose declared purpose is benign suddenly asks to read .env, tokens, credentials, or send data to an external destination, "
+            "that is malicious. Return strict JSON only."
+        )
+        user_prompt = json.dumps({
+            "task": "For each candidate, decide whether it should be kept as malicious intent.",
+            "output_schema": {
+                "decisions": [
+                    {
+                        "index": 0,
+                        "malicious_intent": True,
+                        "reason": "1 sentence explaining why this is clearly malicious rather than sloppy design"
+                    }
+                ]
+            },
+            "candidates": prompt_items,
+        }, ensure_ascii=False)
+
+        try:
+            client = AsyncOpenAI(api_key=qwen_key, base_url=self.QWEN_OPENAI_BASE)
+            resp = await client.chat.completions.create(
+                model=self.INTENT_MODEL,
+                temperature=0.0,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            data = json.loads(raw)
+            decisions = data.get("decisions", []) or []
+            keep_map = {
+                int(item.get("index")): str(item.get("reason", "")).strip()
+                for item in decisions
+                if item.get("malicious_intent") is True
+            }
+            kept: list[dict[str, Any]] = []
+            for idx, issue in enumerate(candidates):
+                if idx in keep_map:
+                    issue = dict(issue)
+                    issue["intent"] = keep_map[idx]
+                    kept.append(issue)
+            return kept
+        except Exception:
+            return self._filter_malicious_issues_heuristic(candidates)
+
+    def _read_file_excerpt(self, repo_dir: str, file_path: str) -> str:
+        if not file_path:
+            return ""
+        try:
+            full_path = Path(repo_dir) / file_path
+            if not full_path.exists() or not full_path.is_file():
+                return ""
+            text = full_path.read_text(encoding="utf-8", errors="ignore")
+            return text[: self.FILE_CONTEXT_MAX_CHARS]
+        except Exception:
+            return ""
+
+    async def _localize_issues_for_display(self, issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not issues:
+            return issues
+
+        translated = [dict(issue) for issue in issues]
+        qwen_key = os.getenv("QWEN_API_KEY", "")
+        if not qwen_key:
+            return translated
+
+        items = []
+        for idx, issue in enumerate(translated):
+            items.append({
+                "index": idx,
+                "finding": issue.get("finding") or "",
+                "explanation": issue.get("explanation") or issue.get("message") or "",
+                "remediation": issue.get("remediation") or "",
+                "intent": issue.get("intent") or "",
+            })
+
+        system_prompt = (
+            "You are translating security scanner output into Simplified Chinese for a technical UI. "
+            "Preserve the original meaning exactly. Use concise, natural cybersecurity wording. "
+            "Do not translate code, file paths, domains, rule IDs, environment variable names, or code snippets. "
+            "Return strict JSON only."
+        )
+        user_prompt = json.dumps({
+            "task": "Translate each non-empty free-text field into Simplified Chinese.",
+            "output_schema": {
+                "translations": [
+                    {
+                        "index": 0,
+                        "finding": "",
+                        "explanation": "",
+                        "remediation": "",
+                        "intent": "",
+                    }
+                ]
+            },
+            "items": items,
+        }, ensure_ascii=False)
+
+        try:
+            client = AsyncOpenAI(api_key=qwen_key, base_url=self.QWEN_OPENAI_BASE)
+            resp = await client.chat.completions.create(
+                model=self.INTENT_MODEL,
+                temperature=0.0,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            data = json.loads((resp.choices[0].message.content or "").strip())
+            for item in data.get("translations", []) or []:
+                idx = item.get("index")
+                if not isinstance(idx, int) or idx < 0 or idx >= len(translated):
+                    continue
+                target = translated[idx]
+                for field in ("finding", "explanation", "remediation", "intent"):
+                    value = item.get(field)
+                    if isinstance(value, str) and value.strip():
+                        target[field] = value.strip()
+            return translated
+        except Exception:
+            return translated
+
+    def _render_result(self, report: dict[str, Any], repo_dir: str, issues: list[dict[str, Any]]) -> dict:
         en = self.lang == "en"
         risk = report.get("risk_assessment", {}) or {}
         components = report.get("components", []) or []
         raw_issues = report.get("issues", []) or []
-        issues = self._filter_malicious_issues(raw_issues)
         meta = report.get("metadata", {}) or {}
 
         skillspector_score = int(risk.get("score", 0) or 0)  # higher = worse
@@ -162,9 +330,9 @@ class SkillAnalyzer:
         findings = [
             {
                 "type": "INFO",
-                "title": "📊 Risk Assessment" if en else "📊 Risk Assessment",
+                "title": "📊 Risk Assessment" if en else "📊 风险评估",
                 "detail": self._render_risk_assessment(
-                    effective_risk_score,
+                    platform_score,
                     risk_level,
                     recommendation,
                     len(raw_issues),
@@ -177,7 +345,7 @@ class SkillAnalyzer:
             },
             {
                 "type": "INFO",
-                "title": "🧩 Components" if en else "🧩 Components",
+                "title": "🧩 Components" if en else "🧩 组件明细",
                 "detail": self._render_components(components, issues, repo_dir, en),
                 "is_html": True,
             },
@@ -188,7 +356,7 @@ class SkillAnalyzer:
             f"from {len(raw_issues)} raw findings · risk {risk_level}"
             if en
             else f"SkillSpector 已扫描 {len(components)} 个组件 · 从 {len(raw_issues)} 个原始发现中保留 "
-                 f"{len(issues)} 个恶意 High/Critical 问题 · 风险等级 {risk_level}"
+                 f"{len(issues)} 个恶意高危/严重问题 · 风险等级 {self._severity_label(risk_level, en)}"
         )
         return {
             "score": platform_score,
@@ -214,7 +382,7 @@ class SkillAnalyzer:
 
     def _render_risk_assessment(
         self,
-        effective_risk_score: int,
+        display_risk_score: int,
         risk_level: str,
         recommendation: str,
         raw_issue_count: int,
@@ -239,18 +407,19 @@ class SkillAnalyzer:
             if meta.get("llm_requested") and meta.get("llm_available")
             else "仅静态分析"
         )
-        recommendation_label = recommendation.replace("_", " ")
+        recommendation_label = self._recommendation_label(recommendation, en)
+        severity_label = self._severity_label(risk_level, en)
         return f"""
 <div style="font-size:11px;">
   <table style="width:100%;border-collapse:collapse;background:#f8fafc;border-radius:6px;overflow:hidden;border:1px solid #e2e8f0;">
     <tbody>
-      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">Risk Score</td><td style="padding:6px 8px;text-align:right;color:{severity_color};font-weight:700;">{effective_risk_score} / 100</td></tr>
-      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">Severity</td><td style="padding:6px 8px;text-align:right;color:{severity_color};font-weight:700;">{self._esc(risk_level)}</td></tr>
-      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">Recommendation</td><td style="padding:6px 8px;text-align:right;">{self._esc(recommendation_label)}</td></tr>
-      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">Counted Issues</td><td style="padding:6px 8px;text-align:right;">{counted_issue_count} (malicious High / Critical)</td></tr>
-      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">Raw Findings</td><td style="padding:6px 8px;text-align:right;">{raw_issue_count}</td></tr>
-      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">Raw SkillSpector Score</td><td style="padding:6px 8px;text-align:right;">{raw_skillspector_score} / 100 (unfiltered)</td></tr>
-      <tr><td style="padding:6px 8px;font-weight:600;">Analysis Mode</td><td style="padding:6px 8px;text-align:right;">{self._esc(llm_mode if en else llm_mode_zh)}</td></tr>
+      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">{'Risk Score' if en else '风险分数'}</td><td style="padding:6px 8px;text-align:right;color:{severity_color};font-weight:700;">{display_risk_score} / 100</td></tr>
+      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">{'Severity' if en else '严重级别'}</td><td style="padding:6px 8px;text-align:right;color:{severity_color};font-weight:700;">{self._esc(severity_label)}</td></tr>
+      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">{'Recommendation' if en else '建议'}</td><td style="padding:6px 8px;text-align:right;">{self._esc(recommendation_label)}</td></tr>
+      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">{'Counted Issues' if en else '计分问题数'}</td><td style="padding:6px 8px;text-align:right;">{counted_issue_count} {'(malicious High / Critical)' if en else '（仅统计恶意高危 / 严重）'}</td></tr>
+      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">{'Raw Findings' if en else '原始发现数'}</td><td style="padding:6px 8px;text-align:right;">{raw_issue_count}</td></tr>
+      <tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-weight:600;">{'Raw SkillSpector Score' if en else 'SkillSpector 原始分数'}</td><td style="padding:6px 8px;text-align:right;">{raw_skillspector_score} / 100 {'(unfiltered)' if en else '（未过滤）'}</td></tr>
+      <tr><td style="padding:6px 8px;font-weight:600;">{'Analysis Mode' if en else '分析模式'}</td><td style="padding:6px 8px;text-align:right;">{self._esc(llm_mode if en else llm_mode_zh)}</td></tr>
     </tbody>
   </table>
 </div>"""
@@ -280,7 +449,7 @@ class SkillAnalyzer:
             collapsed_title = (
                 f"Low / Medium Components ({len(collapsed_rows)})"
                 if en else
-                f"Low / Medium 组件（{len(collapsed_rows)}）"
+                f"中低风险组件（{len(collapsed_rows)}）"
             )
             collapsed_group = f"""
 <details style="border-top:1px solid #e2e8f0;background:#f8fafc;">
@@ -293,14 +462,14 @@ class SkillAnalyzer:
   <div style="margin-bottom:6px;color:#64748b;">{self._esc(source_label)}</div>
   <div style="border:1px solid #e2e8f0;border-radius:6px;overflow:hidden;background:#f8fafc;">
     <div style="display:grid;grid-template-columns:2.3fr 0.9fr 1.4fr 0.75fr 0.95fr 1.2fr 0.6fr 0.6fr;gap:0;padding:6px 8px;background:#e2e8f0;font-weight:600;color:#475569;">
-      <div>Path</div>
-      <div>Type</div>
+      <div>{'Path' if en else '路径'}</div>
+      <div>{'Type' if en else '类型'}</div>
       <div>{'Dimension' if en else '维度'}</div>
-      <div style="text-align:right;">Score</div>
-      <div>{'Severity' if en else 'Severity'}</div>
-      <div>{'Recommendation' if en else 'Recommendation'}</div>
-      <div style="text-align:right;">Lines</div>
-      <div style="text-align:center;">Exec</div>
+      <div style="text-align:right;">{'Score' if en else '分数'}</div>
+      <div>{'Severity' if en else '严重级别'}</div>
+      <div>{'Recommendation' if en else '建议'}</div>
+      <div style="text-align:right;">{'Lines' if en else '行数'}</div>
+      <div style="text-align:center;">{'Exec' if en else '可执行'}</div>
     </div>
     <div>{''.join(visible_rows)}{collapsed_group}</div>
   </div>
@@ -347,7 +516,8 @@ class SkillAnalyzer:
             "HIGH": "#dc2626",
             "CRITICAL": "#991b1b",
         }.get(severity, "#475569")
-        recommendation = str(summary["recommendation"]).replace("_", " ")
+        recommendation = self._recommendation_label(summary["recommendation"], en)
+        severity_label = self._severity_label(severity, en)
         dimensions = ", ".join(summary["dimensions"]) if summary["dimensions"] else ("None" if en else "无")
         issues = summary["issues"]
         issue_count_label = (
@@ -360,13 +530,13 @@ class SkillAnalyzer:
   <summary style="list-style:none;cursor:pointer;padding:0;">
     <div style="display:grid;grid-template-columns:2.3fr 0.9fr 1.4fr 0.75fr 0.95fr 1.2fr 0.6fr 0.6fr;gap:0;padding:8px 8px;align-items:start;">
       <div style="font-family:monospace;color:#0f172a;padding-right:8px;word-break:break-all;">{self._esc(summary['path'])}</div>
-      <div style="padding-right:8px;">{self._esc(summary['type'])}</div>
+      <div style="padding-right:8px;">{self._esc(self._component_type_label(summary['type'], en))}</div>
       <div style="padding-right:8px;color:#334155;">{self._esc(dimensions)}</div>
       <div style="text-align:right;padding-right:8px;font-weight:700;color:{sev_color};">{summary['display_score']}</div>
-      <div style="padding-right:8px;color:{sev_color};font-weight:700;">{self._esc(severity)}</div>
+      <div style="padding-right:8px;color:{sev_color};font-weight:700;">{self._esc(severity_label)}</div>
       <div style="padding-right:8px;">{self._esc(recommendation)}</div>
       <div style="text-align:right;padding-right:8px;">{self._esc(str(summary['lines']))}</div>
-      <div style="text-align:center;">{'Yes' if summary['executable'] else 'No'}</div>
+      <div style="text-align:center;">{'Yes' if en and summary['executable'] else 'No' if en else '是' if summary['executable'] else '否'}</div>
     </div>
   </summary>
   <div style="padding:0 10px 10px 10px;background:#ffffff;border-top:1px solid #e2e8f0;">
@@ -406,10 +576,10 @@ class SkillAnalyzer:
                 "<div style='border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;margin-bottom:8px;background:#f8fafc;'>"
                 f"<div style='display:flex;justify-content:space-between;gap:8px;align-items:flex-start;'>"
                 f"<div style='font-weight:700;color:#0f172a;'>{self._esc(rule_id or dimension)}</div>"
-                f"<div style='color:{sev_color};font-weight:700;'>{self._esc(severity)}</div>"
+                f"<div style='color:{sev_color};font-weight:700;'>{self._esc(self._severity_label(severity, en))}</div>"
                 "</div>"
                 f"<div style='margin-top:4px;color:#475569;'><b>{'Dimension' if en else '维度'}:</b> {self._esc(dimension)}</div>"
-                + (f"<div style='margin-top:4px;color:#475569;'><b>Line:</b> {self._esc(str(line))}</div>" if line else "")
+                + (f"<div style='margin-top:4px;color:#475569;'><b>{'Line' if en else '行号'}:</b> {self._esc(str(line))}</div>" if line else "")
                 + (f"<div style='margin-top:4px;color:#475569;'><b>{'Confidence' if en else '置信度'}:</b> {confidence_str}</div>" if confidence is not None else "")
                 + (f"<div style='margin-top:6px;color:#334155;line-height:1.6;'><b>{'Issue' if en else '问题'}:</b> {self._esc(str(explanation))}</div>" if explanation else "")
                 + (f"<div style='margin-top:6px;color:#334155;line-height:1.6;'><b>{'Recommendation' if en else '修复建议'}:</b> {self._esc(str(remediation))}</div>" if remediation else "")
@@ -431,12 +601,12 @@ class SkillAnalyzer:
     def _issue_dimension(self, issue: dict[str, Any], en: bool) -> str:
         category = issue.get("category")
         if category:
-            return str(category)
+            return self._localize_category(str(category), en)
 
         rule_id = str(issue.get("id") or issue.get("rule_id") or "").upper()
         mapping = {
             "SSD": ("Semantic Security", "语义安全"),
-            "P": ("Prompt Injection", "Prompt Injection"),
+            "P": ("Prompt Injection", "提示词注入"),
             "E": ("Data Exfiltration", "数据外传"),
             "PE": ("Privilege Escalation", "权限提升"),
             "SC": ("Supply Chain", "供应链"),
@@ -444,7 +614,7 @@ class SkillAnalyzer:
             "OH": ("Output Handling", "输出处理"),
             "MP": ("Memory Poisoning", "记忆污染"),
             "TM": ("Tool Misuse", "工具滥用"),
-            "RA": ("Rogue Agent", "Rogue Agent"),
+            "RA": ("Rogue Agent", "失控代理"),
             "TR": ("Trigger Abuse", "触发器滥用"),
             "AST": ("Dangerous Execution", "危险执行"),
             "TT": ("Taint Flow", "污点传播"),
@@ -455,6 +625,65 @@ class SkillAnalyzer:
             if rule_id.startswith(prefix):
                 return labels[0] if en else labels[1]
         return "Other" if en else "其他"
+
+    def _severity_label(self, severity: str, en: bool) -> str:
+        if en:
+            return str(severity).upper()
+        return {
+            "LOW": "低",
+            "MEDIUM": "中",
+            "HIGH": "高",
+            "CRITICAL": "严重",
+        }.get(str(severity).upper(), str(severity))
+
+    def _recommendation_label(self, recommendation: str, en: bool) -> str:
+        rec = str(recommendation).upper()
+        if en:
+            return rec.replace("_", " ")
+        return {
+            "SAFE": "可安装",
+            "CAUTION": "谨慎安装",
+            "DO_NOT_INSTALL": "禁止安装",
+        }.get(rec, rec.replace("_", " "))
+
+    def _localize_category(self, category: str, en: bool) -> str:
+        if en:
+            return category
+        mapping = {
+            "Semantic Security": "语义安全",
+            "Prompt Injection": "提示词注入",
+            "Data Exfiltration": "数据外传",
+            "Privilege Escalation": "权限提升",
+            "Supply Chain": "供应链",
+            "Excessive Agency": "过度代理能力",
+            "Output Handling": "输出处理",
+            "Memory Poisoning": "记忆污染",
+            "Tool Misuse": "工具滥用",
+            "Rogue Agent": "失控代理",
+            "Trigger Abuse": "触发器滥用",
+            "Dangerous Execution": "危险执行",
+            "Taint Flow": "污点传播",
+            "YARA / Malware": "YARA / 恶意模式",
+            "MCP Security": "MCP 安全",
+        }
+        return mapping.get(category, category)
+
+    def _component_type_label(self, component_type: str, en: bool) -> str:
+        value = str(component_type)
+        if en:
+            return value
+        mapping = {
+            "code": "代码",
+            "config": "配置",
+            "prompt": "提示词",
+            "workflow": "工作流",
+            "binary": "二进制",
+            "script": "脚本",
+            "document": "文档",
+            "documentation": "文档",
+            "data": "数据",
+        }
+        return mapping.get(value.lower(), value)
 
     def _compute_issue_score(self, issues: list[dict[str, Any]], executable: bool,
                              count_medium_low: bool = True) -> int:
@@ -473,7 +702,7 @@ class SkillAnalyzer:
             score = int(score * 1.3)
         return max(0, min(100, score))
 
-    def _filter_malicious_issues(self, issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _filter_malicious_issues_heuristic(self, issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
         filtered: list[dict[str, Any]] = []
         for issue in issues:
             severity = str(issue.get("severity", "LOW")).upper()
@@ -509,9 +738,12 @@ class SkillAnalyzer:
 
         has_sensitive = any(word in text for word in sensitive_words)
         has_outbound = any(word in text for word in outbound_words)
+        has_external_domain = bool(re.search(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", text))
         has_exec = any(word in text for word in exec_words)
         has_stealth = any(word in text for word in stealth_words)
         has_obfuscation = any(word in text for word in obfuscation_words)
+        if not has_outbound and has_external_domain and any(word in text for word in ("send", "sent", "upload", "transmit", "forward")):
+            has_outbound = True
 
         if rule_id == "E2":
             return has_sensitive and has_outbound

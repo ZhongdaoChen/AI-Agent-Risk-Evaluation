@@ -8,6 +8,7 @@ import os
 import re
 from typing import AsyncGenerator, Optional
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 from pydantic import BaseModel
@@ -48,6 +49,26 @@ ANALYZER_ORDER = [
     "runtime",
 ]
 
+SCORING_WEIGHTS = {
+    "github":       0.12,
+    "depsdev":      0.05,
+    "code":         0.23,
+    "deps":         0.13,
+    "ai_safety":    0.18,
+    "skill":        0.12,
+    "privacy":      0.08,
+    "supply_chain": 0.05,
+    "runtime":      0.04,
+}
+
+INTERNAL_PROJECT_SCORE_EXCLUDED_MODULES = {
+    "github",
+    "depsdev",
+    "deps",
+    "supply_chain",
+    "runtime",
+}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -72,27 +93,74 @@ def parse_github_url(url: str) -> tuple[str, str]:
     raise ValueError(f"无法解析 GitHub 链接: {url}")
 
 
-def calculate_overall(results: dict) -> dict:
-    weights = {
-        "github":       0.12,
-        "depsdev":      0.05,
-        "code":         0.23,
-        "deps":         0.13,
-        "ai_safety":    0.18,
-        "skill":        0.12,
-        "privacy":      0.08,
-        "supply_chain": 0.05,
-        "runtime":      0.04,
+async def check_public_repo_access(owner: str, repo: str) -> dict:
+    """Check whether the repository is publicly reachable without credentials."""
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "AI-Risk-Evaluator/1.0",
     }
+    api_check = "github_api:not_checked"
+
+    async with httpx.AsyncClient(headers=headers, timeout=10, follow_redirects=True) as client:
+        try:
+            response = await client.get(f"https://api.github.com/repos/{owner}/{repo}")
+            api_check = f"github_api:{response.status_code}"
+            if response.status_code == 200 and response.json().get("private") is False:
+                return {
+                    "public_accessible": True,
+                    "project_type": "public_github_repository",
+                    "access_check": api_check,
+                }
+        except httpx.HTTPError as e:
+            api_check = f"github_api_failed:{type(e).__name__}"
+
+        try:
+            web_response = await client.get(f"https://github.com/{owner}/{repo}")
+            web_check = f"github_web:{web_response.status_code}"
+        except httpx.HTTPError as e:
+            web_check = f"github_web_failed:{type(e).__name__}"
+        else:
+            if web_response.status_code == 200:
+                return {
+                    "public_accessible": True,
+                    "project_type": "public_github_repository",
+                    "access_check": f"{api_check};{web_check}",
+                }
+
+    return {
+        "public_accessible": False,
+        "project_type": "company_employee_developed",
+        "access_check": f"{api_check};{web_check}",
+    }
+
+
+def calculate_overall(results: dict, excluded_modules: Optional[set[str]] = None) -> dict:
+    excluded_modules = excluded_modules or set()
     total_w, weighted = 0.0, 0.0
-    for key, w in weights.items():
+    scored_modules = []
+    score_excluded_modules = sorted(key for key in excluded_modules if key in results)
+
+    for key, w in SCORING_WEIGHTS.items():
+        if key in excluded_modules:
+            continue
         if key in results and isinstance(results[key].get("score"), (int, float)):
             score = results[key]["score"]
             if results[key].get("risk_level") != "UNKNOWN":
                 weighted += score * w
                 total_w += w
+                scored_modules.append(key)
 
-    final = round(weighted / total_w, 1) if total_w > 0 else 50.0
+    if total_w == 0:
+        return {
+            "score": 50.0,
+            "risk_level": "UNKNOWN",
+            "emoji": "⚪",
+            "label": "Not Scored",
+            "scored_modules": scored_modules,
+            "excluded_modules": score_excluded_modules,
+        }
+
+    final = round(weighted / total_w, 1)
 
     if final >= 75:
         risk = "LOW"
@@ -111,7 +179,14 @@ def calculate_overall(results: dict) -> dict:
         emoji = "⚫"
         label = "Critical Risk"
 
-    return {"score": final, "risk_level": risk, "emoji": emoji, "label": label}
+    return {
+        "score": final,
+        "risk_level": risk,
+        "emoji": emoji,
+        "label": label,
+        "scored_modules": scored_modules,
+        "excluded_modules": score_excluded_modules,
+    }
 
 
 def normalize_selected_modules(modules: Optional[str]) -> list[str]:
@@ -134,7 +209,14 @@ async def stream_analysis(url: str, token: Optional[str], lang: str = "zh",
         yield sse({"type": "error", "message": str(e)})
         return
 
-    yield sse({"type": "start", "owner": owner, "repo": repo})
+    repo_access = await check_public_repo_access(owner, repo)
+    score_excluded_modules = (
+        INTERNAL_PROJECT_SCORE_EXCLUDED_MODULES
+        if not repo_access["public_accessible"]
+        else set()
+    )
+
+    yield sse({"type": "start", "owner": owner, "repo": repo, "repo_access": repo_access})
 
     analyzers = [
         ("github",        "⭐ Reputation & Activity",            GitHubAnalyzer(owner, repo, token)),
@@ -186,7 +268,8 @@ async def stream_analysis(url: str, token: Optional[str], lang: str = "zh",
         yield sse({"type": "result", "phase": key, "name": name, "data": result})
         await asyncio.sleep(0.05)
 
-    overall = calculate_overall(results)
+    overall = calculate_overall(results, excluded_modules=score_excluded_modules)
+    overall.update(repo_access)
     yield sse({"type": "complete", "overall": overall})
 
 
@@ -287,9 +370,9 @@ Based on the above, generate actionable security control recommendations for tea
 - Goal: constrain each detected capability to its intended scope; ensure no single action is irreversible without human awareness.
 
 【Output Requirements】
-Generate recommendations across exactly these 3 categories:
+Generate recommendations across up to these 4 categories:
 
-1. **Capability Boundary Controls** — For each HIGH/MEDIUM capability detected, provide a specific control that restricts it to expected scope. Example: "Agent has shell execution → restrict to a whitelist of allowed commands, block destructive flags".
+1. **Capability Boundary Controls** — Only for LLM-controllable capabilities: the LLM can trigger the capability AND the LLM output dynamically controls execution parameters or targets such as commands, file paths, URLs, SQL, request bodies, recipients, cloud resources, or API arguments. For each HIGH/MEDIUM LLM-controllable capability, provide a specific control that restricts it to expected scope. Example: "Agent has shell execution where the LLM controls command text → restrict to a whitelist of allowed commands, block destructive flags". Exclude deterministic capabilities and capabilities whose parameters are fixed, hard-coded, or constrained to a safe enum/allowlist that the LLM cannot expand; their blast radius is already clear and they do not need Capability Boundary Controls.
 
 2. **Guardrail Configuration** — For each POSITIVE guardrail already present, explain how to properly configure it for production. For example: if human approval exists, specify which capability categories must trigger it.
 
@@ -299,6 +382,7 @@ Generate recommendations across exactly these 3 categories:
 
 Rules:
 - Every recommendation must reference a specific detected capability or guardrail finding ("Because this agent has X / lacks Y...")
+- Do not generate Capability Boundary Controls for findings marked deterministic, not LLM-invocable, fixed/constrained, or where no evidence shows LLM-controlled parameters. If there are no LLM-controllable capabilities, omit this category rather than filling it with generic controls.
 - Each item must include: title (≤8 words), precondition, reason (why, what could go wrong), implementation, example, priority (MUST/RECOMMEND/OPTIONAL), category
 - `precondition` must state the concrete condition under which this control is necessary, so teams whose environment doesn't meet it can safely skip the control. Example: "Restrict file operation permissions" → precondition: "If the environment where the agent runs contains other sensitive files". If a control always applies regardless of environment, set precondition to "Applies unconditionally".
 - `implementation` must be a concrete, deploy-time runbook the team can follow as-is — NOT generic advice. It must:
@@ -306,8 +390,8 @@ Rules:
   · Give the actual values or list (e.g. exactly which commands belong on the allowlist, which destructive flags to block)
   · State how to VERIFY the control works (e.g. how to test that a command outside the allowlist is rejected)
 - `example` field: provide a ready-to-copy config or code snippet (e.g. an allowlist array, a wrapper function, a Dockerfile fragment, a K8s/seccomp config, iptables egress rules). Preserve newlines and indentation. If no code example genuinely applies, use an empty string.
-- Worked example (format reference only): Shell execution detected → implementation explains "add an allowlist check in the function that runs shell commands; permit only git/ls/cat, reject rm/curl/chmod and shell metacharacters", and `example` contains the corresponding allowlist-check code snippet.
-- At least 3 items per category; total ≥ 12
+- Worked example (format reference only): Shell execution detected with LLM-controlled command text → implementation explains "add an allowlist check in the function that runs shell commands; permit only git/ls/cat, reject rm/curl/chmod and shell metacharacters", and `example` contains the corresponding allowlist-check code snippet.
+- Prefer 8-12 high-signal items total. Do not pad categories with generic recommendations; include fewer items when the scan evidence does not support more.
 - Output in English
 - Return valid JSON: {{"controls": [{{"category": "Capability Boundary Controls", "title": "...", "precondition": "...", "reason": "...", "implementation": "...", "example": "...", "priority": "MUST"}}]}}"""
 
@@ -340,9 +424,9 @@ Rules:
 - 目标：将每类检测到的能力限制在预期范围内；确保没有单次操作在用户不知情的情况下造成不可逆影响。
 
 【输出要求】
-严格按以下 3 个维度生成建议：
+按以下最多 4 个维度生成建议：
 
-1. **能力边界管控** — 针对每一条检测到的 HIGH/MEDIUM 能力，给出具体的限制措施，将其约束在预期范围内。例如："Agent 具备 Shell 执行能力 → 限制为允许命令白名单，屏蔽破坏性参数"。
+1. **能力边界管控** — 只针对「LLM 可管控能力」：LLM 可以触发该能力，并且 LLM 输出会动态影响执行参数或目标，例如命令、文件路径、URL、SQL、请求体、收件人、云资源或 API 参数。针对每一条 HIGH/MEDIUM 的 LLM 可管控能力，给出具体限制措施，将其约束在预期范围内。例如："Agent 具备 Shell 执行能力，且命令文本由 LLM 输出控制 → 限制为允许命令白名单，屏蔽破坏性参数"。排除确定性能力，以及参数固定、硬编码、或被安全枚举/白名单约束且 LLM 无法扩展的能力；这类能力爆炸半径清晰，不需要生成能力边界管控。
 
 2. **护栏配置建议** — 针对已检测到存在的安全护栏（POSITIVE），说明在生产环境中应如何正确配置。例如：已有人工审批 → 明确哪些能力类别必须触发审批。
 
@@ -352,6 +436,7 @@ Rules:
 
 规则：
 - 每条建议必须引用具体的能力或护栏发现项（"因为该 Agent 具备 X / 缺少 Y..."）
+- 不要为标记为确定性、非 LLM 可触发、参数固定/受限，或没有证据表明参数由 LLM 输出控制的发现项生成「能力边界管控」。如果没有 LLM 可管控能力，应省略该维度，而不是用泛泛建议凑数。
 - 每条包含：title（8字以内）、precondition（前提条件）、reason、implementation、example、priority（MUST/RECOMMEND/OPTIONAL）、category
 - precondition 必须写明「在什么前提条件下，这条管控才是必要的」，以便不满足该前提的团队可以安全地跳过此条。例如："限制文件操作权限" → precondition："如果 Agent 运行的环境中存在其他敏感文件"。若该条管控在任何环境下都必须执行，则 precondition 填"无条件适用"。
 - implementation 必须是「部署该 Agent 时可直接照做的落地步骤」，而不是泛泛而谈。要求：
@@ -359,8 +444,8 @@ Rules:
   · 给出具体取值或清单（如：命令白名单到底包含哪些命令、需要屏蔽哪些破坏性参数/元字符）
   · 说明如何验证该管控已生效（如：如何测试一条不在白名单内的命令会被拒绝）
 - example 字段：给出一段可直接复制使用的配置或代码片段（如白名单数组、命令校验封装函数、Dockerfile 片段、K8s/seccomp 配置、iptables 出口规则等），保留换行与缩进；若该条确实无法给出代码示例，则用空字符串。
-- 范例（仅作格式参考）：检测到 Shell 执行能力 → implementation 说明"在 Agent 执行 shell 命令的封装函数处加入命令白名单校验，仅放行 git/ls/cat，拒绝 rm/curl/chmod 及 shell 元字符"，example 给出对应的白名单校验代码片段。
-- 每个维度至少 3 条，总计不少于 12 条
+- 范例（仅作格式参考）：检测到 Shell 执行能力且命令文本由 LLM 控制 → implementation 说明"在 Agent 执行 shell 命令的封装函数处加入命令白名单校验，仅放行 git/ls/cat，拒绝 rm/curl/chmod 及 shell 元字符"，example 给出对应的白名单校验代码片段。
+- 优先输出 8-12 条高信号建议。不要用泛泛建议凑满类别；扫描证据不足时可以少于 8 条。
 - 全部中文输出
 - 返回合法 JSON：{{"controls": [{{"category": "能力边界管控", "title": "...", "precondition": "...", "reason": "...", "implementation": "...", "example": "...", "priority": "MUST"}}]}}"""
 

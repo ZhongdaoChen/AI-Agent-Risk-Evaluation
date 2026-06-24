@@ -120,6 +120,8 @@ Each module returns a **0-100** score where:
 
 The overall score is a weighted average across enabled modules, excluding modules with `risk_level = "UNKNOWN"`.
 
+Before scoring, the backend checks whether the GitHub repository is publicly accessible without credentials. If it is not publicly accessible, the project is treated as a company employee-developed project. The scan can still run, but the following public-project signals are excluded from the final risk score: `Reputation & Activity`, `deps.dev Package Health`, `Dependency Vulnerability Scan`, `Supply Chain Integrity`, and `Runtime Isolation`.
+
 Current weights:
 
 | Module | Weight |
@@ -228,6 +230,8 @@ That is because the controls prompt is currently grounded in:
 - agent capability findings
 - guardrail findings
 - runtime isolation findings
+
+`Capability Boundary Controls` are generated only for LLM-controllable capabilities: the LLM can trigger the capability and its output dynamically controls execution parameters or targets. Deterministic capabilities, or capabilities whose parameters are fixed, hard-coded, or constrained to a safe allowlist/enum that the LLM cannot expand, are excluded from that category.
 
 ## API
 
