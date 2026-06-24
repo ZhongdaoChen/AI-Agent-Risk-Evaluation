@@ -15,9 +15,9 @@ if ! command -v python3 &>/dev/null; then
 fi
 
 # Install deps if needed
-if ! python3 -c "import fastapi, uvicorn, httpx" &>/dev/null 2>&1; then
+if ! python3 -c "import fastapi, uvicorn, httpx, dotenv, openai, skillspector" &>/dev/null 2>&1; then
   echo "📦 安装依赖..."
-  pip3 install -r requirements.txt -q
+  python3 -m pip install -r requirements.txt -q
 fi
 
 PORT=${PORT:-9999}

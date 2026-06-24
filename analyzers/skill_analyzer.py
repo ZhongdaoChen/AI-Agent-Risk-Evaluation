@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -100,7 +101,7 @@ class SkillAnalyzer:
         try:
             env = os.environ.copy()
             cmd = [
-                "python3",
+                sys.executable,
                 "-m",
                 "skillspector.cli",
                 "scan",
