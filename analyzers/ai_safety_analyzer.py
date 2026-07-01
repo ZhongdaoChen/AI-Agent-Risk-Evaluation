@@ -1,5 +1,5 @@
 """
-AI Safety Guardrails Analyzer — LLM Edition
+Agent Guardrails Analyzer — LLM Edition
 Uses Qwen to holistically understand the project's AI safety posture.
 No regex. The model understands context, intent, and implementation quality.
 """
@@ -581,7 +581,7 @@ Return in JSON format with only the file path list:
 
         body = (
             f"该仓库自身并不驱动 LLM 决策环路（项目类型：<b>{self._esc(type_label)}</b>），"
-            "没有可被 guardrails 约束的 Agent 运行时。AI 安全护栏（人工审批、步骤限制、提示注入防御、"
+            "没有可被 guardrails 约束的 Agent 运行时。Agent安全护栏（人工审批、步骤限制、提示注入防御、"
             "对模型输出的校验等）是<b>集成它的 Agent</b> 的责任，而非本仓库。因此本维度不评分，"
             "并已从总体风险中排除——缺少 guardrails 在这里不算缺陷。"
         )

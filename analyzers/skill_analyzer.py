@@ -31,7 +31,7 @@ class SkillAnalyzer:
     GITHUB_BASE = "https://api.github.com"
     QWEN_OPENAI_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL = "qwen-plus"
-    INTENT_MODEL = "qwen-turbo"
+    INTENT_MODEL = "qwen-plus"
     FILE_CONTEXT_MAX_CHARS = 2000
     FILE_RISK_RECOMMENDATION = {
         "LOW": "SAFE",
@@ -179,24 +179,33 @@ class SkillAnalyzer:
 
         system_prompt = (
             "You are a security reviewer for AI agent skills. "
-            "Your job is to decide whether each candidate finding shows SUBJECTIVE ATTACK INTENT, "
-            "not merely bad engineering or insufficient validation. "
-            "Keep a finding only when the skill appears to deliberately steal secrets, exfiltrate data, "
-            "execute hidden or remote payloads, establish persistence/backdoors, or perform sensitive actions "
-            "that are clearly unrelated to the skill's declared purpose. "
-            "Do NOT keep findings that are merely about missing validation, generic dangerous APIs, powerful but legitimate capabilities, "
-            "prompt-injection-like wording in docs/comments, ordinary dependency CVEs, or broad design concerns without clear malicious intent. "
-            "Purpose mismatch matters a lot: if a skill whose declared purpose is benign suddenly asks to read .env, tokens, credentials, or send data to an external destination, "
-            "that is malicious. Return strict JSON only."
+            "Your default decision must be malicious_intent=false. "
+            "Only set malicious_intent=true when there is clear, positive evidence that the skill intentionally performs one of these malicious actions: "
+            "steals secrets/credentials/tokens, exfiltrates data to an external destination, downloads or executes hidden/remote payloads, "
+            "establishes persistence/backdoors, or performs sensitive actions unrelated to the declared skill purpose. "
+            "Do NOT mark as malicious when the evidence is only a credential path appearing in README/docs/comments/docstrings, "
+            "a configuration table mentioning .env/auth.json/secrets, a defensive example of dangerous paths such as /etc/passwd or ~/.ssh/id_rsa, "
+            "validation gaps, generic dangerous APIs, powerful but legitimate capabilities, test fixtures/examples, ordinary dependency CVEs, "
+            "or a weak heuristic finding using words like 'could indicate'. "
+            "If evidence is ambiguous, incomplete, or could reasonably be benign, return malicious_intent=false. "
+            "For malicious_intent=true, cite the exact data flow as source -> operation -> destination; if you cannot identify all three, return false. "
+            "Return strict JSON only."
         )
         user_prompt = json.dumps({
-            "task": "For each candidate, decide whether it should be kept as malicious intent.",
+            "task": "For each candidate, decide whether it should be kept as clear malicious intent. Prefer false positives when evidence is incomplete.",
             "output_schema": {
                 "decisions": [
                     {
                         "index": 0,
-                        "malicious_intent": True,
-                        "reason": "1 sentence explaining why this is clearly malicious rather than sloppy design"
+                        "malicious_intent": False,
+                        "confidence": "low|medium|high",
+                        "classification": "false_positive|malicious|benign_security_hygiene|insufficient_evidence",
+                        "reason": "Explain why this is or is not clearly malicious.",
+                        "required_evidence": {
+                            "source": "",
+                            "operation": "",
+                            "destination": "",
+                        },
                     }
                 ]
             },
@@ -228,7 +237,7 @@ class SkillAnalyzer:
                     issue = dict(issue)
                     issue["intent"] = keep_map[idx]
                     kept.append(issue)
-            return kept
+            return self._enforce_malicious_intent_policy(kept)
         except Exception:
             return self._filter_malicious_issues_heuristic(candidates)
 
@@ -441,8 +450,10 @@ class SkillAnalyzer:
 
         summaries = [self._build_component_summary(comp, issues, en) for comp in components]
         summaries.sort(key=lambda item: (self._severity_rank(item["severity"]), item["display_score"], item["path"]))
-        visible_rows = [self._render_component_row(item, en) for item in summaries if item["severity"] in {"CRITICAL", "HIGH"}]
-        collapsed_rows = [self._render_component_row(item, en) for item in summaries if item["severity"] in {"MEDIUM", "LOW"}]
+        visible_items = [item for item in summaries if self._has_counted_issue(item["issues"])]
+        collapsed_items = [item for item in summaries if not self._has_counted_issue(item["issues"])]
+        visible_rows = [self._render_component_row(item, en) for item in visible_items]
+        collapsed_rows = [self._render_component_row(item, en) for item in collapsed_items]
 
         source_label = repo_dir if en else repo_dir
         collapsed_group = ""
@@ -456,6 +467,19 @@ class SkillAnalyzer:
 <details style="border-top:1px solid #e2e8f0;background:#f8fafc;">
   <summary style="cursor:pointer;padding:10px 12px;font-weight:700;color:#475569;list-style:none;">{self._esc(collapsed_title)}</summary>
   <div style="border-top:1px solid #e2e8f0;">{''.join(collapsed_rows)}</div>
+</details>"""
+
+        visible_group = ""
+        if visible_rows:
+            visible_title = (
+                f"High / Critical Components ({len(visible_rows)})"
+                if en else
+                f"高风险组件（{len(visible_rows)}）"
+            )
+            visible_group = f"""
+<details open style="border-top:1px solid #e2e8f0;background:#fff;">
+  <summary style="cursor:pointer;padding:10px 12px;font-weight:700;color:#991b1b;list-style:none;">{self._esc(visible_title)}</summary>
+  <div style="border-top:1px solid #e2e8f0;">{''.join(visible_rows)}</div>
 </details>"""
 
         return f"""
@@ -472,9 +496,12 @@ class SkillAnalyzer:
       <div style="text-align:right;">{'Lines' if en else '行数'}</div>
       <div style="text-align:center;">{'Exec' if en else '可执行'}</div>
     </div>
-    <div>{''.join(visible_rows)}{collapsed_group}</div>
+    <div>{visible_group}{collapsed_group}</div>
   </div>
 </div>"""
+
+    def _has_counted_issue(self, issues: list[dict[str, Any]]) -> bool:
+        return any(str(issue.get("severity", "")).upper() in {"HIGH", "CRITICAL"} for issue in issues)
 
     def _build_component_summary(
         self,
@@ -485,10 +512,8 @@ class SkillAnalyzer:
         path = str(comp.get("path", ""))
         related = [
             issue for issue in issues
-            if str((issue.get("location") or {}).get("file", "")) == path
+            if self._issue_matches_component(issue, path)
         ]
-        if not related:
-            related = [issue for issue in issues if str((issue.get("location") or {}).get("file", "")).endswith(path)]
 
         raw_risk_score = self._compute_issue_score(related, bool(comp.get("executable")))
         display_score = max(0, min(100, 100 - raw_risk_score))
@@ -508,6 +533,24 @@ class SkillAnalyzer:
             "dimensions": dimensions,
             "issues": related,
         }
+
+    def _issue_matches_component(self, issue: dict[str, Any], component_path: str) -> bool:
+        issue_path = self._normalize_report_path(str((issue.get("location") or {}).get("file", "")))
+        comp_path = self._normalize_report_path(component_path)
+        if not issue_path or not comp_path:
+            return False
+        return (
+            issue_path == comp_path
+            or issue_path.startswith(f"{comp_path}/")
+            or comp_path.startswith(f"{issue_path}/")
+            or issue_path.endswith(f"/{comp_path}")
+            or f"/{comp_path}/" in issue_path
+        )
+
+    def _normalize_report_path(self, path: str) -> str:
+        normalized = path.replace("\\", "/").strip().strip("/")
+        parts = [part for part in normalized.split("/") if part and part not in (".", "..")]
+        return "/".join(parts)
 
     def _render_component_row(self, summary: dict[str, Any], en: bool) -> str:
         severity = summary["severity"]
@@ -566,6 +609,7 @@ class SkillAnalyzer:
             rule_id = str(issue.get("id") or issue.get("rule_id") or "")
             dimension = self._issue_dimension(issue, en)
             location = issue.get("location") or {}
+            file_path = str(location.get("file", ""))
             line = location.get("start_line")
             explanation = issue.get("explanation") or issue.get("message") or ""
             remediation = issue.get("remediation") or ""
@@ -580,6 +624,7 @@ class SkillAnalyzer:
                 f"<div style='color:{sev_color};font-weight:700;'>{self._esc(self._severity_label(severity, en))}</div>"
                 "</div>"
                 f"<div style='margin-top:4px;color:#475569;'><b>{'Dimension' if en else '维度'}:</b> {self._esc(dimension)}</div>"
+                + (f"<div style='margin-top:4px;color:#475569;'><b>{'File' if en else '文件'}:</b> {self._esc(file_path)}</div>" if file_path else "")
                 + (f"<div style='margin-top:4px;color:#475569;'><b>{'Line' if en else '行号'}:</b> {self._esc(str(line))}</div>" if line else "")
                 + (f"<div style='margin-top:4px;color:#475569;'><b>{'Confidence' if en else '置信度'}:</b> {confidence_str}</div>" if confidence is not None else "")
                 + (f"<div style='margin-top:6px;color:#334155;line-height:1.6;'><b>{'Issue' if en else '问题'}:</b> {self._esc(str(explanation))}</div>" if explanation else "")
@@ -711,7 +756,174 @@ class SkillAnalyzer:
                 continue
             if self._looks_intentionally_malicious(issue):
                 filtered.append(issue)
-        return filtered
+        return self._enforce_malicious_intent_policy(filtered)
+
+    def _enforce_malicious_intent_policy(self, issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Final deterministic guardrail for noisy scanner/LLM decisions.
+
+        Skill risk is intentionally narrower than generic SAST quality: only
+        issues with clear malicious intent should affect the score.
+        """
+        kept: list[dict[str, Any]] = []
+        for issue in issues:
+            if self._is_documentation_or_comment_false_positive(issue):
+                continue
+            if self._is_benign_desktop_update_false_positive(issue):
+                continue
+            if self._is_generic_security_quality_issue(issue):
+                continue
+            if self._passes_malicious_intent_gate(issue):
+                kept.append(issue)
+        return kept
+
+    def _passes_malicious_intent_gate(self, issue: dict[str, Any]) -> bool:
+        if self._has_malicious_negation(issue):
+            return False
+        return (
+            self._has_explicit_secret_exfiltration_flow(issue)
+            or self._has_hidden_or_remote_payload_execution(issue)
+            or self._has_explicit_backdoor_or_persistence(issue)
+            or self._has_malware_signature_evidence(issue)
+        )
+
+    def _has_malicious_negation(self, issue: dict[str, Any]) -> bool:
+        text = self._issue_text(issue)
+        return any(
+            phrase in text
+            for phrase in (
+                "not malicious", "no malicious intent", "without malicious intent",
+                "not deliberate", "not intentionally malicious", "merely bad engineering",
+                "benign", "false positive",
+            )
+        )
+
+    def _is_documentation_or_comment_false_positive(self, issue: dict[str, Any]) -> bool:
+        if self._has_explicit_secret_exfiltration_flow(issue):
+            return False
+
+        location = issue.get("location") or {}
+        file_path = str(location.get("file", "")).lower()
+        snippet = str(issue.get("code_snippet") or "")
+        text = self._issue_text(issue)
+
+        doc_file = (
+            file_path.endswith((".md", ".mdx", ".rst", ".txt"))
+            or "/docs/" in file_path
+            or file_path.endswith("readme")
+            or "readme" in file_path.rsplit("/", 1)[-1]
+        )
+        markdown_table = "|" in snippet and ("env var" in snippet.lower() or "default" in snippet.lower())
+        docstring_or_comment = (
+            snippet.strip().startswith(('"""', "'''", "#", "//", "/*", "*"))
+            or "docstring" in text
+            or "defensive example" in text
+            or "prompt-injection paths" in text
+        )
+        sensitive_reference = any(
+            marker in text
+            for marker in (".env", "auth.json", "~/.ssh/id_rsa", "/etc/passwd", "project secret", "credential files")
+        )
+        weak_finding = "could indicate" in text or "configuration table" in text
+
+        return sensitive_reference and (doc_file or markdown_table or docstring_or_comment or weak_finding)
+
+    def _is_benign_desktop_update_false_positive(self, issue: dict[str, Any]) -> bool:
+        rule_id = str(issue.get("id") or issue.get("rule_id") or "").upper()
+        if rule_id != "RA1":
+            return False
+        if self._has_explicit_backdoor_or_persistence(issue):
+            return False
+
+        location = issue.get("location") or {}
+        file_path = str(location.get("file", "")).lower()
+        text = self._issue_text(issue)
+        in_app_code = any(segment in file_path for segment in ("/desktop/", "/electron/", "apps/"))
+        updater_terms = (
+            "self-update", "update branch", "default_update_branch", "setbranch",
+            "resolvegitbinary", "git binary", "portablegit", "git-for-windows",
+            "not-a-git-checkout", "source install", "update check", "check for updates",
+        )
+        skill_self_mod_terms = ("skill.md", "tool manifest", "disable safety", "safety constraint")
+        return (
+            in_app_code
+            and any(term in text for term in updater_terms)
+            and not any(term in text for term in skill_self_mod_terms)
+        )
+
+    def _has_explicit_backdoor_or_persistence(self, issue: dict[str, Any]) -> bool:
+        text = self._issue_text(issue)
+        return any(
+            term in text
+            for term in (
+                "backdoor", "reverse shell", "persistence", "launch agent",
+                "cron", "startup item", "disable safety", "bypass approval",
+                "hidden payload", "remote payload",
+            )
+        )
+
+    def _has_hidden_or_remote_payload_execution(self, issue: dict[str, Any]) -> bool:
+        text = self._issue_text(issue)
+        has_exec = any(
+            term in text
+            for term in (
+                "exec(", "eval(", "os.system", "subprocess", "bash -c", "shell=true",
+                "popen(", "| bash", "| sh", " sh ", " bash ",
+            )
+        )
+        has_remote_download = any(term in text for term in ("curl ", "wget ", "fetch(", "http://", "https://"))
+        has_hidden_payload = any(
+            term in text
+            for term in ("base64", "obfuscat", "encoded payload", "hidden payload", "payload.sh", "malicious.com")
+        )
+        return has_exec and (has_hidden_payload or ("malicious.com" in text and has_remote_download))
+
+    def _has_malware_signature_evidence(self, issue: dict[str, Any]) -> bool:
+        rule_id = str(issue.get("id") or issue.get("rule_id") or "").upper()
+        if not rule_id.startswith("YR"):
+            return False
+        text = self._issue_text(issue)
+        return any(
+            term in text
+            for term in (
+                "reverse shell", "backdoor", "ransomware", " c2", "command and control",
+                "info stealer", "webshell", "cryptominer", "cryptojacking", "exploit",
+            )
+        )
+
+    def _has_explicit_secret_exfiltration_flow(self, issue: dict[str, Any]) -> bool:
+        text = self._issue_text(issue)
+        if not any(term in text for term in ("malicious.com", "exfil", "steal", "leak", "upload", "webhook", "discord", "telegram", "pastebin")):
+            return False
+        source = r"(\.env|auth\.json|token|secret|credential|password|private key|id_rsa)"
+        operation = r"(read|steal|collect|open|readfile|fs\.readfile|cat\s+|access)"
+        destination = r"(send|sent|post|upload|exfiltrat|leak|webhook|https?://|requests\.post|httpx\.post|fetch\()"
+        return bool(
+            re.search(operation + r".{0,120}" + source + r".{0,160}" + destination, text)
+            or re.search(source + r".{0,120}" + operation + r".{0,160}" + destination, text)
+            or re.search(source + r".{0,160}" + destination, text) and "malicious.com" in text
+        )
+
+    def _is_generic_security_quality_issue(self, issue: dict[str, Any]) -> bool:
+        if self._has_clear_malicious_intent(issue):
+            return False
+
+        rule_id = str(issue.get("id") or issue.get("rule_id") or "").upper()
+        category = str(issue.get("category") or "").lower()
+        text = self._issue_text(issue)
+
+        generic_rule = rule_id.startswith(("SDI", "CWE", "BANDIT", "PYSEC", "JS"))
+        generic_category = any(word in category for word in ("taint", "injection", "validation", "semantic security"))
+        generic_terms = (
+            "shell injection", "command injection", "path injection", "code injection",
+            "sql injection", "xss", "path traversal", "taint flow", "unsanitized",
+            "untrusted input", "input validation", "sanitize", "sanitization",
+            "word splitting", "glob", "find -path", "shell metacharacter",
+            "static analyzer", "false positive", "generic dangerous api",
+        )
+        return generic_rule or generic_category or any(term in text for term in generic_terms)
+
+    def _has_clear_malicious_intent(self, issue: dict[str, Any]) -> bool:
+        return self._passes_malicious_intent_gate(issue)
 
     def _looks_intentionally_malicious(self, issue: dict[str, Any]) -> bool:
         rule_id = str(issue.get("id") or issue.get("rule_id") or "").upper()

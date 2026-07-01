@@ -19,16 +19,16 @@ The web UI supports **module-level selection**, so users can choose which analys
 
 ## Current analysis modules
 
-1. **Agent Capability Analysis**  
+1. **Agent Capability / Blast Radius**  
    Identifies what the LLM can actually trigger, estimates blast radius only for capabilities whose parameters or targets are dynamically controlled by LLM output, and separates fixed/constrained or deterministic capabilities from scored blast radius.
 
 2. **Skill Security Quality**  
-   Uses **SkillSpector** to scan skills/tools, then post-filters the results to keep only **subjectively malicious High/Critical findings**. Routine coding sloppiness, generic CVEs, and non-malicious validation gaps are excluded.
+   Uses **SkillSpector** to scan skills/tools, then post-filters the results to keep only **subjectively malicious High/Critical findings**. Routine coding sloppiness, generic CVEs, SDI/SAST-style injection warnings, and non-malicious validation gaps are excluded from scoring.
 
-3. **AI Safety Guardrails**  
+3. **Agent Guardrails**  
    Evaluates whether the repository contains controls that constrain the **LLM decision loop**, such as human approval, step limits, tool gating, and prompt-injection defenses.
 
-4. **Reputation & Activity**  
+4. **Open-source Reputation & Activity**  
    Uses GitHub repository metadata such as stars, contributors, last update time, and security documentation.
 
 5. **deps.dev Package Health**  
@@ -77,7 +77,7 @@ The Skill module is intentionally opinionated:
 
 - it uses SkillSpector as the scanning engine
 - but it only keeps **malicious High/Critical** findings
-- it excludes low-signal or merely sloppy-but-not-malicious findings
+- it applies a deterministic final policy that excludes low-signal SDI/SAST findings and merely sloppy-but-not-malicious validation issues, even if the semantic reviewer over-classifies them
 
 In other words, this module is closer to **"malicious skill risk"** than generic linting or code-quality review.
 
@@ -121,16 +121,16 @@ Each module returns a **0-100** score where:
 
 The overall score is a weighted average across enabled modules, excluding modules with `risk_level = "UNKNOWN"`.
 
-Before scoring, the backend checks whether the GitHub repository is publicly accessible without credentials. If it is not publicly accessible, the project is treated as a company employee-developed project. The scan can still run, but the following public-project signals are excluded from the final risk score: `Reputation & Activity`, `deps.dev Package Health`, `Dependency Vulnerability Scan`, `Supply Chain Integrity`, and `Runtime Isolation`.
+Before scoring, the backend checks whether the GitHub repository is publicly accessible without credentials. If it is not publicly accessible, the project is treated as a company employee-developed project. The scan can still run, but the following public-project signals are excluded from the final risk score: `Open-source Reputation & Activity`, `deps.dev Package Health`, `Dependency Vulnerability Scan`, `Supply Chain Integrity`, and `Runtime Isolation`.
 
 Current weights:
 
 | Module | Weight |
 |---|---:|
-| Agent Capability Analysis | 0.23 |
-| AI Safety Guardrails | 0.18 |
+| Agent Capability / Blast Radius | 0.23 |
+| Agent Guardrails | 0.18 |
 | Dependency Vulnerability Scan | 0.13 |
-| Reputation & Activity | 0.12 |
+| Open-source Reputation & Activity | 0.12 |
 | Skill Security Quality | 0.12 |
 | Data Privacy | 0.08 |
 | deps.dev Package Health | 0.05 |
@@ -182,8 +182,8 @@ Notes:
 
 - `GITHUB_DEFAULT_TOKEN` is optional but helps avoid GitHub rate limits.
 - `QWEN_API_KEY` is required for LLM-backed modules such as:
-  - Agent Capability Analysis
-  - AI Safety Guardrails
+  - Agent Capability / Blast Radius
+  - Agent Guardrails
   - AppSec Security Controls generation
 - The Skill module can fall back to static scanning when no Qwen key is available.
 

@@ -76,6 +76,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 def parse_github_url(url: str) -> tuple[str, str]:
     url = url.strip().rstrip("/")
@@ -219,11 +221,11 @@ async def stream_analysis(url: str, token: Optional[str], lang: str = "zh",
     yield sse({"type": "start", "owner": owner, "repo": repo, "repo_access": repo_access})
 
     analyzers = [
-        ("github",        "⭐ Reputation & Activity",            GitHubAnalyzer(owner, repo, token)),
+        ("github",        "⭐ Open-source Reputation & Activity", GitHubAnalyzer(owner, repo, token)),
         ("depsdev",       "🌐 deps.dev Package Health",          DepsDotDevAnalyzer(owner, repo, token)),
-        ("code",          "🤖 Agent Capability Analysis",            CodeAnalyzer(owner, repo, token, lang=lang)),
+        ("code",          "🤖 Agent Capability / Blast Radius",      CodeAnalyzer(owner, repo, token, lang=lang)),
         ("deps",          "📦 Dependency Vulnerability Scan",    DepsAnalyzer(owner, repo, token)),
-        ("ai_safety",     "🛡️ AI Safety Guardrails",             AISafetyAnalyzer(owner, repo, token, lang=lang)),
+        ("ai_safety",     "🛡️ Agent Guardrails",                 AISafetyAnalyzer(owner, repo, token, lang=lang)),
         ("skill",         "🔧 Skill Security Quality",           SkillAnalyzer(owner, repo, token, lang=lang)),
         ("privacy",       "🔒 Data Privacy",                     PrivacyAnalyzer(owner, repo, token)),
         ("supply_chain",  "⛓️ Supply Chain Integrity",           SupplyChainAnalyzer(owner, repo, token)),
@@ -353,7 +355,7 @@ Risk Level: {req.overall.get('risk_level')} | Score: {req.overall.get('score')} 
 Detected capabilities:
 {cap_findings}
 
-== AI Safety Guardrails (what exists / what's missing) ==
+== Agent Guardrails (what exists / what's missing) ==
 {safety_summary}
 Findings:
 {safety_findings}
@@ -402,12 +404,12 @@ Rules:
 == 总体风险 ==
 风险等级：{req.overall.get('risk_level')} | 综合评分：{req.overall.get('score')} / 100
 
-== Agent 能力分析（爆炸半径）==
+== Agent能力/爆炸半径分析 ==
 {cap_summary}
 检测到的能力：
 {cap_findings}
 
-== AI 安全护栏（已有 / 缺失）==
+== Agent安全护栏（已有 / 缺失）==
 {safety_summary}
 发现项：
 {safety_findings}
@@ -467,6 +469,60 @@ def _extract_controls(data: dict) -> list:
     return []
 
 
+def _normalize_controls(controls: list, lang: str = "zh") -> list:
+    """Normalize LLM control items so the frontend never renders undefined."""
+    if lang == "en":
+        defaults = {
+            "category": "Other",
+            "title": "Untitled control",
+            "precondition": "Applies unconditionally",
+            "reason": "No reason provided.",
+            "implementation": "Implement this control based on the referenced finding and verify it after deployment.",
+            "example": "",
+        }
+    else:
+        defaults = {
+            "category": "其他",
+            "title": "未命名管控",
+            "precondition": "无条件适用",
+            "reason": "未提供原因。",
+            "implementation": "请结合对应发现项实施该管控，并在部署后验证控制有效。",
+            "example": "",
+        }
+
+    priority_map = {
+        "MUST": "MUST",
+        "REQUIRED": "MUST",
+        "必须": "MUST",
+        "强制": "MUST",
+        "RECOMMEND": "RECOMMEND",
+        "RECOMMENDED": "RECOMMEND",
+        "建议": "RECOMMEND",
+        "推荐": "RECOMMEND",
+        "OPTIONAL": "OPTIONAL",
+        "可选": "OPTIONAL",
+    }
+
+    normalized = []
+    for item in controls:
+        if not isinstance(item, dict):
+            continue
+        required_values = [
+            str(item.get(field, "")).strip()
+            for field in ("title", "reason", "implementation")
+        ]
+        if not all(required_values):
+            continue
+        control = {}
+        for field in ("category", "title", "precondition", "reason", "implementation", "example"):
+            value = item.get(field)
+            control[field] = str(value).strip() if value not in (None, "") else defaults[field]
+        raw_priority = str(item.get("priority", "RECOMMEND")).strip().upper()
+        control["priority"] = priority_map.get(raw_priority, "RECOMMEND")
+        normalized.append(control)
+    return normalized
+
+
 @app.post("/api/security-controls")
 async def security_controls(req: ControlsRequest):
     client = AsyncOpenAI(
@@ -500,7 +556,7 @@ async def security_controls(req: ControlsRequest):
             if not controls:
                 last_err = ValueError("empty")
                 continue
-            return {"controls": controls}
+            return {"controls": _normalize_controls(controls, req.lang)}
         except (asyncio.TimeoutError, json.JSONDecodeError) as e:
             last_err = e
             continue

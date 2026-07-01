@@ -153,9 +153,9 @@
 
     <div class="flex justify-center gap-3 mt-4 text-sm text-indigo-300 flex-wrap">
 
-      <span class="dim-tag" data-dim="code">🤖 <span data-i18n="phaseMeta.code.label">Agent能力分析</span>
+      <span class="dim-tag" data-dim="code">🤖 <span data-i18n="phaseMeta.code.label">Agent能力/爆炸半径分析</span>
         <div class="dim-tooltip" id="tooltip-code">
-          <div class="tt-title">🤖 Agent 能力分析（权重 25%）</div>
+          <div class="tt-title">🤖 Agent能力/爆炸半径分析（权重 25%）</div>
           <div class="tt-desc">枚举这个 AI Agent 能做什么（爆炸半径），而非找代码漏洞。由 LLM 语义分析。</div>
           <ul class="tt-items">
             <li>终端/Shell 执行：−25分（最高风险）</li>
@@ -182,9 +182,9 @@
         </div>
       </span>
 
-      <span class="dim-tag" data-dim="ai_safety">🛡️ <span data-i18n="phaseMeta.ai_safety.label">AI安全护栏</span>
+      <span class="dim-tag" data-dim="ai_safety">🛡️ <span data-i18n="phaseMeta.ai_safety.label">Agent安全护栏</span>
         <div class="dim-tooltip" id="tooltip-ai_safety">
-          <div class="tt-title">🛡️ AI 安全护栏（权重 20%）</div>
+          <div class="tt-title">🛡️ Agent安全护栏（权重 20%）</div>
           <div class="tt-desc">评估是否有有效的安全控制机制防止 Agent 失控或被滥用。基准 40 分（保守）。</div>
           <ul class="tt-items">
             <li>人工审批/确认循环：+15分</li>
@@ -197,9 +197,9 @@
         </div>
       </span>
 
-      <span class="dim-tag" data-dim="github">⭐ <span data-i18n="phaseMeta.github.label">声誉</span>
+      <span class="dim-tag" data-dim="github">⭐ <span data-i18n="phaseMeta.github.label">开源项目声誉与活跃度</span>
         <div class="dim-tooltip" id="tooltip-github">
-          <div class="tt-title">⭐ 声誉与活跃度（权重 15%）</div>
+          <div class="tt-title">⭐ 开源项目声誉与活跃度（权重 15%）</div>
           <div class="tt-desc">通过 GitHub 公开数据判断项目的社区信任度、维护状态和安全成熟度。</div>
           <ul class="tt-items">
             <li>Stars 数量：社区验证程度</li>
@@ -292,7 +292,7 @@
       <div class="rounded-xl overflow-hidden" style="background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.12);">
         <button onclick="toggleAbout()" class="w-full flex items-center justify-between px-5 py-3 text-left">
           <span class="text-sm font-semibold text-indigo-200 flex items-center gap-2" id="scopeTitle" data-i18n="scopeTitle">
-            ⚠️ 能力边界说明：本工具仅做静态代码分析，目的是通过对 Agent 的能力解析，做部署前的风险评估，不是恶意代码扫描。以下运行时安全问题无法发现，例如：
+            ⚠️ 能力边界说明：本工具仅做静态代码分析，目的是通过对 Agent 的能力解析，做部署前的风险评估。以下运行时安全问题无法发现，例如：
           </span>
           <i id="aboutChevron" class="fas fa-chevron-up text-indigo-400 text-xs transition-transform"></i>
         </button>
@@ -452,12 +452,15 @@
   <div id="dimensionGrid" class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6"></div>
 
   <!-- Export buttons -->
-  <div class="flex gap-3 justify-end mt-4">
+  <div id="exportButtons" class="flex gap-3 justify-end mt-4">
     <button onclick="exportJSON()" class="text-sm text-gray-500 hover:text-indigo-600 border border-gray-200 rounded-lg px-4 py-2 flex items-center gap-2">
       <i class="fas fa-download"></i> Export JSON
     </button>
-    <button onclick="window.print()" class="text-sm text-gray-500 hover:text-indigo-600 border border-gray-200 rounded-lg px-4 py-2 flex items-center gap-2">
-      <i class="fas fa-print"></i> Print Report
+    <button onclick="exportHTMLReport()" class="text-sm text-gray-500 hover:text-indigo-600 border border-gray-200 rounded-lg px-4 py-2 flex items-center gap-2">
+      <i class="fas fa-file-code"></i> Export HTML Report
+    </button>
+    <button onclick="exportMarkdownReport()" class="text-sm text-gray-500 hover:text-indigo-600 border border-gray-200 rounded-lg px-4 py-2 flex items-center gap-2">
+      <i class="fab fa-markdown"></i> Export Markdown
     </button>
   </div>
 </div>
@@ -469,6 +472,7 @@
   <div class="mt-2" data-i18n="footerCredit">Designed and Developed by adidas AppSec · Peter Chen</div>
 </div>
 
+<script src="/static/report_exporter.js"></script>
 <script>
   // ── i18n ───────────────────────────────────────────────────────────────────
   let currentLang = 'zh';
@@ -495,7 +499,7 @@
       noModulesSelected: '请至少选择一个扫描模块',
       catItems: (n) => `${n} 条`,
       catMust: (n) => `${n} 必须`,
-      scopeTitle: '⚠️ 能力边界说明：本工具仅做静态代码分析，目的是通过对 Agent 的能力解析，做部署前的风险评估，不是恶意代码扫描。以下运行时安全问题无法发现，例如：',
+      scopeTitle: '⚠️ 能力边界说明：本工具仅做静态代码分析，目的是通过对 Agent 的能力解析，做部署前的风险评估。以下运行时安全问题无法发现，例如：',
       scopeItems: [
         'System Prompt 从远程 URL 动态加载的内容',
         '工具调用链在运行时动态组合的行为',
@@ -518,19 +522,19 @@
       howToImpl: '🛠️ 如何实施',
       implExample: '📋 配置 / 代码示例',
       phaseMeta: {
-        github:       { label: '声誉与活跃度', intro: '结合 Stars、最近提交、贡献者和 SECURITY.md，判断维护活跃度与社区信任。' },
+        github:       { label: '开源项目声誉与活跃度', intro: '结合 Stars、最近提交、贡献者和 SECURITY.md，判断开源项目维护活跃度与社区信任。' },
         depsdev:      { label: '依赖包健康度', intro: '调用 deps.dev 交叉看包生态、依赖者规模与公告，补充仓库外部健康信号。' },
-        code:         { label: 'Agent 能力分析', intro: '识别 LLM 实际可触发的工具/skill 与参数控制度，用来估计真实爆炸半径。' },
+        code:         { label: 'Agent能力/爆炸半径分析', intro: '识别 LLM 实际可触发的工具/skill 与参数控制度，用来估计真实爆炸半径。' },
         skill:        { label: 'Skill 安全质量', intro: '基于 SkillSpector 聚合静态规则、AST、YARA 和语义扫描，评估单个 skill 风险。' },
         deps:         { label: '依赖漏洞扫描', intro: '抽取直接依赖并查询 OSV 漏洞库，重点看可被公开利用的高危 CVE。' },
-        ai_safety:    { label: 'AI 安全护栏', intro: '检查是否存在人审、步数限制、工具白名单等机制来约束 LLM 决策环路。' },
+        ai_safety:    { label: 'Agent安全护栏', intro: '检查是否存在人审、步数限制、工具白名单等机制来约束 Agent 的 LLM 决策环路。' },
         privacy:      { label: '数据隐私', intro: '关注日志、遥测、持久化与外发路径，判断用户数据是否可能被过度收集。' },
         supply_chain: { label: '供应链完整性', intro: '检查锁文件、版本固定、哈希校验和制品分发链，识别篡改与漂移风险。' },
         runtime:      { label: '运行时隔离', intro: '评估容器、非 root、沙箱和宿主挂载，判断 agent 失控后的落地影响范围。' },
       },
       tooltips: {
         code: {
-          title: '🤖 Agent 能力分析（权重 25%）',
+          title: '🤖 Agent能力/爆炸半径分析（权重 25%）',
           desc: '枚举这个 AI Agent 能做什么（爆炸半径），而非找代码漏洞。由 LLM 语义分析。',
           items: ['终端/Shell 执行：−25分（最高风险）','代码解释器/REPL：−22分','文件系统写入/删除：−18分','数据库写入：−18分','云服务/邮件/外部 API 等'],
           weight: '高分(75+)=低影响能力；低分(&lt;35)=几乎可完全控制宿主系统'
@@ -542,13 +546,13 @@
           weight: 'Medium / Low 默认不计分；普通缺校验、一般 CVE 不纳入最终评分'
         },
         ai_safety: {
-          title: '🛡️ AI 安全护栏（权重 20%）',
+          title: '🛡️ Agent安全护栏（权重 20%）',
           desc: '评估是否有有效的安全控制机制防止 Agent 失控或被滥用。基准 40 分（保守）。',
           items: ['人工审批/确认循环：+15分','步骤/轮次上限：+15分','工具白名单/权限系统：+10分','Prompt Injection 防御：+8分','exec/eval 执行 LLM 输出：−25分'],
           weight: '用户输入直接注入 System Prompt −15分；完全无安全机制 −15分'
         },
         github: {
-          title: '⭐ 声誉与活跃度（权重 15%）',
+          title: '⭐ 开源项目声誉与活跃度（权重 15%）',
           desc: '通过 GitHub 公开数据判断项目的社区信任度、维护状态和安全成熟度。',
           items: ['Stars 数量：社区验证程度','最后提交时间：维护活跃度','贡献者数量：Bus Factor 风险','SECURITY.md：漏洞响应机制','CI/CD 工作流：代码变更是否自动检验'],
           weight: '⚠️ 已归档仓库 −30分；停止维护超1年 +0分'
@@ -635,19 +639,19 @@
       howToImpl: '🛠️ How to implement',
       implExample: '📋 Config / code example',
       phaseMeta: {
-        github:       { label: 'Reputation & Activity', intro: 'Combines stars, recent commits, contributors, and SECURITY.md to infer maintenance and trust.' },
+        github:       { label: 'Open-source Reputation & Activity', intro: 'Combines stars, recent commits, contributors, and SECURITY.md to infer open-source maintenance and trust.' },
         depsdev:      { label: 'Package Health', intro: 'Uses deps.dev ecosystem signals, dependents, and advisories to add external package-health context.' },
-        code:         { label: 'Agent Capability Analysis', intro: 'Maps LLM-invocable tools plus parameter controllability to estimate real blast radius.' },
+        code:         { label: 'Agent Capability / Blast Radius', intro: 'Maps LLM-invocable tools plus parameter controllability to estimate real blast radius.' },
         skill:        { label: 'Skill Security Quality', intro: 'Uses SkillSpector static rules, AST, YARA, and semantic checks to score per-skill risk.' },
         deps:         { label: 'Dependency Vulnerabilities', intro: 'Extracts direct dependencies and queries OSV for known CVEs, prioritizing exploitable ones.' },
-        ai_safety:    { label: 'AI Safety Guardrails', intro: 'Checks whether human approval, limits, and tool gating constrain the LLM decision loop.' },
+        ai_safety:    { label: 'Agent Guardrails', intro: 'Checks whether human approval, limits, and tool gating constrain the agent LLM decision loop.' },
         privacy:      { label: 'Data Privacy', intro: 'Looks at logging, telemetry, persistence, and outbound paths to assess data over-collection risk.' },
         supply_chain: { label: 'Supply Chain Integrity', intro: 'Checks locks, pinning, hash verification, and artifact flow for tampering or drift risk.' },
         runtime:      { label: 'Runtime Isolation', intro: 'Evaluates containers, non-root execution, sandboxes, and host mounts to bound impact.' },
       },
       tooltips: {
         code: {
-          title: '🤖 Agent Capability Analysis (Weight 25%)',
+          title: '🤖 Agent Capability / Blast Radius (Weight 25%)',
           desc: 'Identifies all operations this AI agent can perform on the host system or external services — the "blast radius" if compromised.',
           items: ['Shell / terminal execution: −25pts (highest risk)','Code interpreter / REPL: −22pts','File system write / delete: −18pts','Database write: −18pts','Cloud services / email / external APIs, etc.'],
           weight: 'High score (75+) = low-impact capabilities; Low score (&lt;35) = near-full host system control'
@@ -659,13 +663,13 @@
           weight: 'Medium / Low do not score by default; routine validation gaps and generic CVEs are excluded'
         },
         ai_safety: {
-          title: '🛡️ AI Safety Guardrails (Weight 20%)',
+          title: '🛡️ Agent Guardrails (Weight 20%)',
           desc: 'Evaluates whether effective safety controls prevent the agent from going out of control or being misused. Baseline 40 points (conservative).',
           items: ['Human approval / confirmation loop: +15pts','Step / turn limits: +15pts','Tool allowlist / permission system: +10pts','Prompt injection defense: +8pts','exec/eval on LLM output: −25pts'],
           weight: 'User input directly injected into System Prompt −15pts; No safety mechanisms at all −15pts'
         },
         github: {
-          title: '⭐ Reputation & Activity (Weight 15%)',
+          title: '⭐ Open-source Reputation & Activity (Weight 15%)',
           desc: 'Uses public GitHub data to assess community trust, maintenance status, and security maturity.',
           items: ['Stars: community validation level','Last commit date: maintenance activity','Contributor count: bus factor risk','SECURITY.md: vulnerability response process','CI/CD workflows: automated code validation'],
           weight: '⚠️ Archived repo −30pts; Unmaintained >1 year +0pts'
@@ -762,12 +766,12 @@
   }
 
   const PHASE_META = {
-    github:       { icon: '⭐', label: '声誉与活跃度', intro: '', fullWidth: false },
+    github:       { icon: '⭐', label: '开源项目声誉与活跃度', intro: '', fullWidth: false },
     depsdev:      { icon: '🌐', label: '依赖包健康度', intro: '', fullWidth: false },
-    code:         { icon: '🤖', label: 'Agent 能力分析', intro: '', fullWidth: true  },
+    code:         { icon: '🤖', label: 'Agent能力/爆炸半径分析', intro: '', fullWidth: true  },
     skill:        { icon: '🔧', label: 'Skill 安全质量', intro: '', fullWidth: true  },
     deps:         { icon: '📦', label: '依赖漏洞扫描', intro: '', fullWidth: true  },
-    ai_safety:    { icon: '🛡️', label: 'AI 安全护栏', intro: '', fullWidth: true  },
+    ai_safety:    { icon: '🛡️', label: 'Agent安全护栏', intro: '', fullWidth: true  },
     privacy:      { icon: '🔒', label: '数据隐私', intro: '', fullWidth: false },
     supply_chain: { icon: '⛓️', label: '供应链完整性', intro: '', fullWidth: false },
     runtime:      { icon: '🐳', label: '运行时隔离', intro: '', fullWidth: false },
@@ -778,6 +782,7 @@ const PHASE_ORDER = ['code', 'skill', 'ai_safety', 'github', 'depsdev', 'deps', 
 
 let allResults = {};
 let latestOverall = null;
+let latestControls = [];
 let currentTarget = '';
 let selectedPhaseKeys = PHASE_ORDER.slice();
 
@@ -839,6 +844,7 @@ function startAnalysis() {
   // Reset UI
   allResults = {};
   latestOverall = null;
+  latestControls = [];
   document.getElementById('progressSection').classList.remove('hidden');
   document.getElementById('resultsSection').classList.add('hidden');
   document.getElementById('errorSection').classList.add('hidden');
@@ -1151,12 +1157,68 @@ function exportJSON() {
     timestamp: new Date().toISOString(),
     overall: latestOverall,
     results: allResults,
+    controls: latestControls,
   };
-  const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+  downloadReportFile(JSON.stringify(report, null, 2), 'json', 'application/json');
+}
+
+function buildReportState() {
+  return {
+    target: currentTarget,
+    generatedAt: new Date().toISOString(),
+    language: currentLang,
+    overall: latestOverall,
+    results: allResults,
+    controls: latestControls,
+    phaseOrder: PHASE_ORDER,
+    phaseMeta: PHASE_META,
+  };
+}
+
+function getInlineReportStyles() {
+  return Array.from(document.querySelectorAll('style'))
+    .map(style => style.textContent || '')
+    .join('\n');
+}
+
+function buildCurrentReportSnapshotHtml() {
+  const results = document.getElementById('resultsSection');
+  if (!results) return '';
+  const clone = results.cloneNode(true);
+  clone.querySelector('#exportButtons')?.remove();
+  clone.querySelectorAll('.hidden').forEach(el => {
+    if (el.id === 'securityControlsCard') return;
+  });
+  return clone.outerHTML;
+}
+
+function downloadReportFile(content, extension, mimeType) {
+  if (!currentTarget || !latestOverall) {
+    alert(currentLang === 'en' ? 'Run an analysis before exporting a report.' : '请先完成一次分析，再导出报告。');
+    return;
+  }
+  const stem = ReportExporter.reportFileStem(currentTarget);
+  const blob = new Blob([content], { type: mimeType });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `ai-risk-report-${currentTarget.replace('/','_')}.json`;
+  a.download = `${stem}.${extension}`;
   a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportHTMLReport() {
+  const html = ReportExporter.buildHtmlSnapshotReport({
+    target: currentTarget,
+    generatedAt: new Date().toISOString(),
+    contentHtml: buildCurrentReportSnapshotHtml(),
+    inlineStyles: getInlineReportStyles(),
+  });
+  downloadReportFile(html, 'html', 'text/html;charset=utf-8');
+}
+
+function exportMarkdownReport() {
+  const markdown = ReportExporter.buildMarkdownReport(buildReportState());
+  downloadReportFile(markdown, 'md', 'text/markdown;charset=utf-8');
 }
 
 // Allow Enter key to submit
@@ -1225,6 +1287,7 @@ async function fetchSecurityControls(overall) {
     if (data.error || !Array.isArray(data.controls) || data.controls.length === 0) {
       throw new Error(data.error || (currentLang === 'en' ? 'No recommendations returned' : '未返回任何建议'));
     }
+    latestControls = data.controls;
     renderSecurityControls(data.controls);
   } catch (e) {
     const S = STRINGS[currentLang];
@@ -1242,6 +1305,49 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;');
 }
 
+function normalizeSecurityControl(control) {
+  const isEn = currentLang === 'en';
+  const priorityMap = {
+    MUST: 'MUST',
+    REQUIRED: 'MUST',
+    '必须': 'MUST',
+    '强制': 'MUST',
+    RECOMMEND: 'RECOMMEND',
+    RECOMMENDED: 'RECOMMEND',
+    '建议': 'RECOMMEND',
+    '推荐': 'RECOMMEND',
+    OPTIONAL: 'OPTIONAL',
+    '可选': 'OPTIONAL',
+  };
+  const valueOrDefault = (value, fallback) => {
+    if (value === undefined || value === null) return fallback;
+    const text = String(value).trim();
+    return text ? text : fallback;
+  };
+  const rawPriority = valueOrDefault(control.priority, 'RECOMMEND').toUpperCase();
+  return {
+    category: valueOrDefault(control.category, isEn ? 'Other' : '其他'),
+    title: valueOrDefault(control.title, isEn ? 'Untitled control' : '未命名管控'),
+    precondition: valueOrDefault(control.precondition, isEn ? 'Applies unconditionally' : '无条件适用'),
+    reason: valueOrDefault(control.reason, isEn ? 'No reason provided.' : '未提供原因。'),
+    implementation: valueOrDefault(
+      control.implementation,
+      isEn
+        ? 'Implement this control based on the referenced finding and verify it after deployment.'
+        : '请结合对应发现项实施该管控，并在部署后验证控制有效。'
+    ),
+    example: valueOrDefault(control.example, ''),
+    priority: priorityMap[rawPriority] || 'RECOMMEND',
+  };
+}
+
+function isValidSecurityControl(control) {
+  return ['title', 'reason', 'implementation'].every(field => {
+    if (control[field] === undefined || control[field] === null) return false;
+    return String(control[field]).trim().length > 0;
+  });
+}
+
 function renderSecurityControls(controls) {
   const loading = document.getElementById('controlsLoading');
   const content = document.getElementById('controlsContent');
@@ -1251,8 +1357,18 @@ function renderSecurityControls(controls) {
   loading.classList.add('hidden');
   content.classList.remove('hidden');
 
-  const mustCount = controls.filter(c => c.priority === 'MUST').length;
-  badge.textContent = S.controlsBadge(controls.length, mustCount);
+  const normalizedControls = controls
+    .filter(isValidSecurityControl)
+    .map(normalizeSecurityControl);
+  if (normalizedControls.length === 0) {
+    loading.classList.remove('hidden');
+    loading.innerHTML = `<div class="text-red-400 text-sm"><i class="fas fa-exclamation-circle mr-1"></i>${S.controlsFailedMsg}${currentLang === 'en' ? 'No valid recommendations returned' : '未返回有效建议'}。${S.controlsFailedContact}</div>`;
+    badge.textContent = S.controlsFailedBadge;
+    badge.className = 'text-xs px-3 py-1 rounded-full bg-red-800 text-red-200';
+    return;
+  }
+  const mustCount = normalizedControls.filter(c => c.priority === 'MUST').length;
+  badge.textContent = S.controlsBadge(normalizedControls.length, mustCount);
   badge.className = 'text-xs px-3 py-1 rounded-full bg-green-700 text-green-100';
 
   const priorityMeta = {
@@ -1265,7 +1381,7 @@ function renderSecurityControls(controls) {
 
   // Group by category
   const grouped = {};
-  controls.forEach(c => {
+  normalizedControls.forEach(c => {
     const cat = c.category || (currentLang === 'en' ? 'Other' : '其他');
     if (!grouped[cat]) grouped[cat] = [];
     grouped[cat].push(c);
