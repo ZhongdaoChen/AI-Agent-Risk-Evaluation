@@ -75,9 +75,12 @@ Ordinary validation or software hygiene that is not tied to the LLM control loop
 
 The Skill module is intentionally opinionated:
 
-- it uses SkillSpector as the scanning engine
-- but it only keeps **malicious High/Critical** findings
-- it applies a deterministic final policy that excludes low-signal SDI/SAST findings and merely sloppy-but-not-malicious validation issues, even if the semantic reviewer over-classifies them
+- SkillSpector provides broad discovery across static rules, AST, YARA, and semantic analyzers.
+- A rule allowlist reduces noise before LLM review. Only `AST*`, `E*`, `EA*`, `P*`, `TP*`, `YR*`, `SSD*`, and `PE3` findings are considered for this module.
+- qwen-plus performs semantic malicious-intent review with `temperature=0.0`.
+- The reviewer must assess whether the scanner severity is overestimated and assign a final risk level.
+- A finding is retained only when `malicious_intent = true` and `final_risk = HIGH or CRITICAL`.
+- The UI shows per-component diagnostics as `raw hits / kept / filtered`, so reviewers can distinguish scanner misses from post-filtered findings.
 
 In other words, this module is closer to **"malicious skill risk"** than generic linting or code-quality review.
 

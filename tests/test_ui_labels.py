@@ -33,6 +33,19 @@ class UiLabelTests(unittest.TestCase):
         self.assertNotIn("不是恶意代码扫描", index_html)
         self.assertIn("能力边界说明：本工具仅做静态代码分析", index_html)
 
+    def test_readme_documents_skill_security_quality_balance_strategy(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for expected in [
+            "SkillSpector provides broad discovery",
+            "rule allowlist reduces noise",
+            "qwen-plus performs semantic malicious-intent review",
+            "malicious_intent = true",
+            "final_risk = HIGH or CRITICAL",
+            "raw hits / kept / filtered",
+        ]:
+            self.assertIn(expected, readme)
+
 
 if __name__ == "__main__":
     unittest.main()

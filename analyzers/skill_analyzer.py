@@ -153,6 +153,7 @@ class SkillAnalyzer:
         candidates = [
             issue for issue in raw_issues
             if str(issue.get("severity", "LOW")).upper() in {"HIGH", "CRITICAL"}
+            and self._is_relevant_skillspector_rule(issue)
         ]
         if not candidates:
             return []
@@ -189,6 +190,8 @@ class SkillAnalyzer:
             "or a weak heuristic finding using words like 'could indicate'. "
             "If evidence is ambiguous, incomplete, or could reasonably be benign, return malicious_intent=false. "
             "For malicious_intent=true, cite the exact data flow as source -> operation -> destination; if you cannot identify all three, return false. "
+            "You must also analyze whether the scanner severity is overestimated. "
+            "Only keep findings whose final_risk is HIGH or CRITICAL; if your final_risk is LOW or MEDIUM, set malicious_intent=false. "
             "Return strict JSON only."
         )
         user_prompt = json.dumps({
@@ -198,6 +201,8 @@ class SkillAnalyzer:
                     {
                         "index": 0,
                         "malicious_intent": False,
+                        "scanner_severity_overestimated": True,
+                        "final_risk": "LOW|MEDIUM|HIGH|CRITICAL",
                         "confidence": "low|medium|high",
                         "classification": "false_positive|malicious|benign_security_hygiene|insufficient_evidence",
                         "reason": "Explain why this is or is not clearly malicious.",
@@ -226,11 +231,7 @@ class SkillAnalyzer:
             raw = (resp.choices[0].message.content or "").strip()
             data = json.loads(raw)
             decisions = data.get("decisions", []) or []
-            keep_map = {
-                int(item.get("index")): str(item.get("reason", "")).strip()
-                for item in decisions
-                if item.get("malicious_intent") is True
-            }
+            keep_map = self._build_llm_keep_map(decisions)
             kept: list[dict[str, Any]] = []
             for idx, issue in enumerate(candidates):
                 if idx in keep_map:
@@ -240,6 +241,29 @@ class SkillAnalyzer:
             return self._enforce_malicious_intent_policy(kept)
         except Exception:
             return self._filter_malicious_issues_heuristic(candidates)
+
+    def _is_relevant_skillspector_rule(self, issue: dict[str, Any]) -> bool:
+        rule_id = str(issue.get("id") or issue.get("rule_id") or "").upper()
+        return (
+            rule_id.startswith(("AST", "E", "EA", "TP", "YR", "SSD"))
+            or re.fullmatch(r"P\d+", rule_id) is not None
+            or rule_id == "PE3"
+        )
+
+    def _build_llm_keep_map(self, decisions: list[dict[str, Any]]) -> dict[int, str]:
+        keep: dict[int, str] = {}
+        for item in decisions or []:
+            if not isinstance(item, dict) or item.get("malicious_intent") is not True:
+                continue
+            final_risk = str(item.get("final_risk", "")).upper()
+            if final_risk not in {"HIGH", "CRITICAL"}:
+                continue
+            try:
+                idx = int(item.get("index"))
+            except (TypeError, ValueError):
+                continue
+            keep[idx] = str(item.get("reason", "")).strip()
+        return keep
 
     def _read_file_excerpt(self, repo_dir: str, file_path: str) -> str:
         if not file_path:
@@ -356,7 +380,7 @@ class SkillAnalyzer:
             {
                 "type": "INFO",
                 "title": "🧩 Components" if en else "🧩 组件明细",
-                "detail": self._render_components(components, issues, repo_dir, en),
+                "detail": self._render_components(components, issues, raw_issues, repo_dir, en),
                 "is_html": True,
             },
         ]
@@ -438,6 +462,7 @@ class SkillAnalyzer:
         self,
         components: list[dict[str, Any]],
         issues: list[dict[str, Any]],
+        raw_issues: list[dict[str, Any]],
         repo_dir: str,
         en: bool,
     ) -> str:
@@ -448,7 +473,7 @@ class SkillAnalyzer:
                 else "SkillSpector 未返回组件信息。"
             )
 
-        summaries = [self._build_component_summary(comp, issues, en) for comp in components]
+        summaries = [self._build_component_summary(comp, issues, raw_issues, en) for comp in components]
         summaries.sort(key=lambda item: (self._severity_rank(item["severity"]), item["display_score"], item["path"]))
         visible_items = [item for item in summaries if self._has_counted_issue(item["issues"])]
         collapsed_items = [item for item in summaries if not self._has_counted_issue(item["issues"])]
@@ -503,15 +528,43 @@ class SkillAnalyzer:
     def _has_counted_issue(self, issues: list[dict[str, Any]]) -> bool:
         return any(str(issue.get("severity", "")).upper() in {"HIGH", "CRITICAL"} for issue in issues)
 
+    def _detect_markdown_malicious_intent(self, file_path: str, content: str) -> list[dict[str, Any]]:
+        """Detect explicit malicious data-flow instructions in SKILL.md text.
+
+        This helper is intentionally not wired into the main scan yet; it supports
+        debugging SkillSpector misses for Markdown-only skill instructions.
+        """
+        text = content.lower()
+        has_source = any(marker in text for marker in (".env", "auth.json", "token", "secret", "user_email", "meeting_notes"))
+        has_operation = any(marker in text for marker in ("read", "collect", "extract", "access"))
+        has_destination = any(marker in text for marker in ("post", "send", "upload", "external", "http://", "https://", "mcp server"))
+        if not (has_source and has_operation and has_destination):
+            return []
+
+        return [{
+            "id": "MD-E1",
+            "severity": "HIGH",
+            "category": "Data Exfiltration",
+            "location": {"file": file_path, "start_line": 1},
+            "finding": "Markdown skill instructions describe sensitive data collection and external transfer.",
+            "explanation": "Detected source -> operation -> destination in SKILL.md natural-language workflow.",
+            "code_snippet": content[:500],
+        }]
+
     def _build_component_summary(
         self,
         comp: dict[str, Any],
         issues: list[dict[str, Any]],
+        raw_issues: list[dict[str, Any]],
         en: bool,
     ) -> dict[str, Any]:
         path = str(comp.get("path", ""))
         related = [
             issue for issue in issues
+            if self._issue_matches_component(issue, path)
+        ]
+        raw_related = [
+            issue for issue in raw_issues
             if self._issue_matches_component(issue, path)
         ]
 
@@ -532,6 +585,9 @@ class SkillAnalyzer:
             "recommendation": recommendation,
             "dimensions": dimensions,
             "issues": related,
+            "raw_issue_count": len(raw_related),
+            "kept_issue_count": len(related),
+            "filtered_issue_count": max(0, len(raw_related) - len(related)),
         }
 
     def _issue_matches_component(self, issue: dict[str, Any], component_path: str) -> bool:
@@ -569,6 +625,11 @@ class SkillAnalyzer:
         )
 
         issue_detail = self._render_component_issues(issues, en)
+        diagnostics = (
+            f"SkillSpector raw hits: {summary['raw_issue_count']} · kept: {summary['kept_issue_count']} · filtered: {summary['filtered_issue_count']}"
+            if en else
+            f"SkillSpector 原始命中: {summary['raw_issue_count']} · 最终保留: {summary['kept_issue_count']} · 已过滤: {summary['filtered_issue_count']}"
+        )
         return f"""
 <details style="border-top:1px solid #e2e8f0;">
   <summary style="list-style:none;cursor:pointer;padding:0;">
@@ -584,6 +645,7 @@ class SkillAnalyzer:
     </div>
   </summary>
   <div style="padding:0 10px 10px 10px;background:#ffffff;border-top:1px solid #e2e8f0;">
+    <div style="margin:8px 0 4px 0;padding:6px 8px;border-radius:6px;background:#f1f5f9;color:#475569;font-size:11px;">🧪 {self._esc(diagnostics)}</div>
     <div style="padding:8px 0 6px 0;color:#64748b;font-weight:600;">{self._esc(issue_count_label)}</div>
     {issue_detail}
   </div>
@@ -759,22 +821,8 @@ class SkillAnalyzer:
         return self._enforce_malicious_intent_policy(filtered)
 
     def _enforce_malicious_intent_policy(self, issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Final deterministic guardrail for noisy scanner/LLM decisions.
-
-        Skill risk is intentionally narrower than generic SAST quality: only
-        issues with clear malicious intent should affect the score.
-        """
-        kept: list[dict[str, Any]] = []
-        for issue in issues:
-            if self._is_documentation_or_comment_false_positive(issue):
-                continue
-            if self._is_benign_desktop_update_false_positive(issue):
-                continue
-            if self._is_generic_security_quality_issue(issue):
-                continue
-            if self._passes_malicious_intent_gate(issue):
-                kept.append(issue)
-        return kept
+        """Return LLM/heuristic-selected issues without final deterministic filtering."""
+        return [issue for issue in issues if isinstance(issue, dict)]
 
     def _passes_malicious_intent_gate(self, issue: dict[str, Any]) -> bool:
         if self._has_malicious_negation(issue):
@@ -793,7 +841,7 @@ class SkillAnalyzer:
             for phrase in (
                 "not malicious", "no malicious intent", "without malicious intent",
                 "not deliberate", "not intentionally malicious", "merely bad engineering",
-                "benign", "false positive",
+                "benign", "false positive", "do not leak", "don't leak", "not leak",
             )
         )
 
@@ -898,9 +946,10 @@ class SkillAnalyzer:
         operation = r"(read|steal|collect|open|readfile|fs\.readfile|cat\s+|access)"
         destination = r"(send|sent|post|upload|exfiltrat|leak|webhook|https?://|requests\.post|httpx\.post|fetch\()"
         return bool(
-            re.search(operation + r".{0,120}" + source + r".{0,160}" + destination, text)
-            or re.search(source + r".{0,120}" + operation + r".{0,160}" + destination, text)
-            or re.search(source + r".{0,160}" + destination, text) and "malicious.com" in text
+            re.search(operation + r".{0,300}" + source + r".{0,400}" + destination, text, re.S)
+            or re.search(source + r".{0,300}" + operation + r".{0,400}" + destination, text, re.S)
+            or re.search(source + r".{0,400}" + destination, text, re.S) and any(op in text for op in ("read", "collect", "extract", "access"))
+            or re.search(source + r".{0,160}" + destination, text, re.S) and "malicious.com" in text
         )
 
     def _is_generic_security_quality_issue(self, issue: dict[str, Any]) -> bool:
