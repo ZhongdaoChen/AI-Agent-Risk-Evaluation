@@ -77,6 +77,8 @@ The Skill module is intentionally opinionated:
 
 - it uses SkillSpector as the scanning engine
 - but it only keeps **malicious High/Critical** findings
+- qwen-plus first reviews each SkillSpector candidate to decide whether the scanner conclusion is a real risk or a false positive; false positives are ignored before scoring
+- for real risks, qwen-plus then assesses malicious intent, whether scanner severity is overestimated, and the final risk level
 - it applies a deterministic final policy that excludes low-signal SDI/SAST findings and merely sloppy-but-not-malicious validation issues, even if the semantic reviewer over-classifies them
 
 In other words, this module is closer to **"malicious skill risk"** than generic linting or code-quality review.

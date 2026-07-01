@@ -12,13 +12,100 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
         self.assertEqual(self.analyzer.INTENT_MODEL, "qwen-plus")
 
     def test_malicious_intent_prompt_defaults_to_false_positive_reduction(self):
-        source = inspect.getsource(SkillAnalyzer._select_malicious_issues)
+        source = inspect.getsource(SkillAnalyzer._build_intent_review_prompt)
 
         self.assertIn("Your default decision must be malicious_intent=false", source)
         self.assertIn("If evidence is ambiguous, incomplete, or could reasonably be benign", source)
         self.assertIn("source -> operation -> destination", source)
         self.assertIn("README/docs/comments/docstrings", source)
         self.assertIn("configuration table mentioning .env/auth.json/secrets", source)
+
+    def test_llm_prompt_requires_real_risk_before_malicious_intent(self):
+        system_prompt, user_prompt = self.analyzer._build_intent_review_prompt([
+            {
+                "index": 0,
+                "rule_id": "E2",
+                "category": "Data Exfiltration",
+                "severity": "HIGH",
+                "file": "SKILL.md",
+                "finding": "Possible secret exfiltration",
+                "explanation": "Scanner explanation",
+                "code_snippet": "example snippet",
+                "file_excerpt": "example excerpt",
+            }
+        ])
+
+        self.assertIn("is_real_risk", user_prompt)
+        self.assertIn("is_false_positive", user_prompt)
+        self.assertIn(
+            "first decide whether the SkillSpector finding is a real risk or a false positive",
+            system_prompt,
+        )
+        self.assertIn("If is_false_positive=true", system_prompt)
+
+    def test_build_llm_keep_map_ignores_false_positive_before_malicious_gate(self):
+        decisions = [
+            {
+                "index": 0,
+                "is_real_risk": False,
+                "is_false_positive": True,
+                "malicious_intent": True,
+                "final_risk": "CRITICAL",
+                "reason": "Scanner matched a documentation example only.",
+            },
+            {
+                "index": 1,
+                "is_real_risk": True,
+                "is_false_positive": False,
+                "malicious_intent": False,
+                "final_risk": "HIGH",
+                "reason": "Real dangerous API use but no malicious intent.",
+            },
+            {
+                "index": 2,
+                "is_real_risk": True,
+                "is_false_positive": False,
+                "malicious_intent": True,
+                "final_risk": "HIGH",
+                "classification": "malicious",
+                "reason": "Reads token and posts it to an external webhook.",
+            },
+        ]
+
+        keep_map = self.analyzer._build_llm_keep_map(decisions)
+
+        self.assertEqual(set(keep_map), {2})
+        self.assertEqual(keep_map[2]["intent"], "Reads token and posts it to an external webhook.")
+        self.assertEqual(keep_map[2]["llm_risk_verdict"], "real_risk")
+        self.assertEqual(keep_map[2]["llm_final_risk"], "HIGH")
+
+    def test_build_llm_keep_map_ignores_real_risk_when_final_risk_is_medium(self):
+        decisions = [
+            {
+                "index": 0,
+                "is_real_risk": True,
+                "is_false_positive": False,
+                "malicious_intent": True,
+                "final_risk": "MEDIUM",
+                "classification": "malicious",
+                "reason": "Suspicious but impact is limited.",
+            }
+        ]
+
+        self.assertEqual(self.analyzer._build_llm_keep_map(decisions), {})
+
+    def test_build_llm_keep_map_requires_explicit_real_risk_true(self):
+        decisions = [
+            {
+                "index": 0,
+                "malicious_intent": True,
+                "final_risk": "HIGH",
+                "classification": "malicious",
+                "reason": "No explicit real-risk verdict.",
+            }
+        ]
+
+        self.assertEqual(self.analyzer._build_llm_keep_map(decisions), {})
 
     def test_filters_generic_sdi_shell_injection_without_malicious_intent(self):
         issue = {
