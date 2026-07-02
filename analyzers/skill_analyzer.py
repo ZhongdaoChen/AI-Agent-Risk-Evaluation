@@ -178,44 +178,7 @@ class SkillAnalyzer:
                 "file_excerpt": self._read_file_excerpt(repo_dir, file_path),
             })
 
-        system_prompt = (
-            "You are a security reviewer for AI agent skills. "
-            "Your default decision must be malicious_intent=false. "
-            "Only set malicious_intent=true when there is clear, positive evidence that the skill intentionally performs one of these malicious actions: "
-            "steals secrets/credentials/tokens, exfiltrates data to an external destination, downloads or executes hidden/remote payloads, "
-            "establishes persistence/backdoors, or performs sensitive actions unrelated to the declared skill purpose. "
-            "Do NOT mark as malicious when the evidence is only a credential path appearing in README/docs/comments/docstrings, "
-            "a configuration table mentioning .env/auth.json/secrets, a defensive example of dangerous paths such as /etc/passwd or ~/.ssh/id_rsa, "
-            "validation gaps, generic dangerous APIs, powerful but legitimate capabilities, test fixtures/examples, ordinary dependency CVEs, "
-            "or a weak heuristic finding using words like 'could indicate'. "
-            "If evidence is ambiguous, incomplete, or could reasonably be benign, return malicious_intent=false. "
-            "For malicious_intent=true, cite the exact data flow as source -> operation -> destination; if you cannot identify all three, return false. "
-            "You must also analyze whether the scanner severity is overestimated. "
-            "Only keep findings whose final_risk is HIGH or CRITICAL; if your final_risk is LOW or MEDIUM, set malicious_intent=false. "
-            "Return strict JSON only."
-        )
-        user_prompt = json.dumps({
-            "task": "For each candidate, decide whether it should be kept as clear malicious intent. Prefer false positives when evidence is incomplete.",
-            "output_schema": {
-                "decisions": [
-                    {
-                        "index": 0,
-                        "malicious_intent": False,
-                        "scanner_severity_overestimated": True,
-                        "final_risk": "LOW|MEDIUM|HIGH|CRITICAL",
-                        "confidence": "low|medium|high",
-                        "classification": "false_positive|malicious|benign_security_hygiene|insufficient_evidence",
-                        "reason": "Explain why this is or is not clearly malicious.",
-                        "required_evidence": {
-                            "source": "",
-                            "operation": "",
-                            "destination": "",
-                        },
-                    }
-                ]
-            },
-            "candidates": prompt_items,
-        }, ensure_ascii=False)
+        system_prompt, user_prompt = self._build_intent_review_prompt(prompt_items)
 
         try:
             client = AsyncOpenAI(api_key=qwen_key, base_url=self.QWEN_OPENAI_BASE)
@@ -236,7 +199,7 @@ class SkillAnalyzer:
             for idx, issue in enumerate(candidates):
                 if idx in keep_map:
                     issue = dict(issue)
-                    issue["intent"] = keep_map[idx]
+                    issue.update(keep_map[idx])
                     kept.append(issue)
             return self._enforce_malicious_intent_policy(kept)
         except Exception:
@@ -250,10 +213,65 @@ class SkillAnalyzer:
             or rule_id == "PE3"
         )
 
-    def _build_llm_keep_map(self, decisions: list[dict[str, Any]]) -> dict[int, str]:
-        keep: dict[int, str] = {}
+    def _build_intent_review_prompt(self, prompt_items: list[dict[str, Any]]) -> tuple[str, str]:
+        system_prompt = (
+            "You are a security reviewer for AI agent skills. "
+            "For each candidate, first decide whether the SkillSpector finding is a real risk or a false positive. "
+            "Use the SkillSpector rule, severity, finding, explanation, code snippet, and file excerpt as evidence. "
+            "If is_false_positive=true, set is_real_risk=false, malicious_intent=false, and final_risk=LOW. "
+            "Your default decision must be malicious_intent=false. "
+            "Do NOT mark as malicious when the evidence is only a credential path appearing in README/docs/comments/docstrings, "
+            "a configuration table mentioning .env/auth.json/secrets, a defensive example of dangerous paths such as /etc/passwd or ~/.ssh/id_rsa, "
+            "validation gaps, generic dangerous APIs, powerful but legitimate capabilities, test fixtures/examples, ordinary dependency CVEs, "
+            "or a weak heuristic finding using words like 'could indicate'. "
+            "Treat documentation examples, comments, test fixtures, generic dangerous APIs, validation gaps, ordinary dependency CVEs, "
+            "ambiguous evidence, incomplete evidence, and findings that could reasonably be benign as false positives. "
+            "If evidence is ambiguous, incomplete, or could reasonably be benign, return malicious_intent=false. "
+            "Only after is_real_risk=true should you decide whether there is clear malicious intent. "
+            "Only set malicious_intent=true when there is clear, positive evidence that the skill intentionally performs one of these malicious actions: "
+            "steals secrets/credentials/tokens, exfiltrates data to an external destination, downloads or executes hidden/remote payloads, "
+            "establishes persistence/backdoors, or performs sensitive actions unrelated to the declared skill purpose. "
+            "For malicious_intent=true, cite the exact data flow as source -> operation -> destination; if you cannot identify all three, return false. "
+            "You must also analyze whether the scanner severity is overestimated. "
+            "Only keep findings whose final_risk is HIGH or CRITICAL; if final_risk is LOW or MEDIUM, set malicious_intent=false. "
+            "Return strict JSON only."
+        )
+        user_prompt = json.dumps({
+            "task": "For each SkillSpector candidate, decide first whether it is a real risk or a false positive. False positives are ignored.",
+            "output_schema": {
+                "decisions": [
+                    {
+                        "index": 0,
+                        "is_real_risk": False,
+                        "is_false_positive": True,
+                        "malicious_intent": False,
+                        "scanner_severity_overestimated": True,
+                        "final_risk": "LOW|MEDIUM|HIGH|CRITICAL",
+                        "confidence": "low|medium|high",
+                        "classification": "false_positive|malicious|benign_security_hygiene|insufficient_evidence",
+                        "reason": "Explain whether SkillSpector's conclusion is a real risk or a false positive, then explain malicious intent if present.",
+                        "required_evidence": {
+                            "source": "",
+                            "operation": "",
+                            "destination": "",
+                        },
+                    }
+                ]
+            },
+            "candidates": prompt_items,
+        }, ensure_ascii=False)
+        return system_prompt, user_prompt
+
+    def _build_llm_keep_map(self, decisions: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
+        keep: dict[int, dict[str, str]] = {}
         for item in decisions or []:
-            if not isinstance(item, dict) or item.get("malicious_intent") is not True:
+            if not isinstance(item, dict):
+                continue
+            if item.get("is_real_risk") is not True:
+                continue
+            if item.get("is_false_positive") is True:
+                continue
+            if item.get("malicious_intent") is not True:
                 continue
             final_risk = str(item.get("final_risk", "")).upper()
             if final_risk not in {"HIGH", "CRITICAL"}:
@@ -262,7 +280,12 @@ class SkillAnalyzer:
                 idx = int(item.get("index"))
             except (TypeError, ValueError):
                 continue
-            keep[idx] = str(item.get("reason", "")).strip()
+            keep[idx] = {
+                "intent": str(item.get("reason", "")).strip(),
+                "llm_risk_verdict": "real_risk",
+                "llm_classification": str(item.get("classification", "malicious")).strip() or "malicious",
+                "llm_final_risk": final_risk,
+            }
         return keep
 
     def _read_file_excerpt(self, repo_dir: str, file_path: str) -> str:

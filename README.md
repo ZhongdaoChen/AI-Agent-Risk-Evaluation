@@ -77,8 +77,8 @@ The Skill module is intentionally opinionated:
 
 - SkillSpector provides broad discovery across static rules, AST, YARA, and semantic analyzers.
 - A rule allowlist reduces noise before LLM review. Only `AST*`, `E*`, `EA*`, `P*`, `TP*`, `YR*`, `SSD*`, and `PE3` findings are considered for this module.
-- qwen-plus performs semantic malicious-intent review with `temperature=0.0`.
-- The reviewer must assess whether the scanner severity is overestimated and assign a final risk level.
+- qwen-plus performs semantic malicious-intent review with `temperature=0.0`; it first reviews each SkillSpector candidate to decide whether the scanner conclusion is a real risk or a false positive, and false positives are ignored before scoring.
+- For real risks, qwen-plus then assesses malicious intent, whether scanner severity is overestimated, and the final risk level.
 - A finding is retained only when `malicious_intent = true` and `final_risk = HIGH or CRITICAL`.
 - The UI shows per-component diagnostics as `raw hits / kept / filtered`, so reviewers can distinguish scanner misses from post-filtered findings.
 
