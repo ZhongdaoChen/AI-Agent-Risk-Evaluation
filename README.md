@@ -80,7 +80,7 @@ The Skill module is intentionally opinionated:
 - qwen-plus performs semantic malicious-intent review with `temperature=0.0`; it first reviews each SkillSpector candidate to decide whether the scanner conclusion is a real risk or a false positive, and false positives are ignored before scoring.
 - For real risks, qwen-plus then assesses malicious intent, whether scanner severity is overestimated, and the final risk level.
 - A finding is retained only when `malicious_intent = true` and `final_risk = HIGH or CRITICAL`.
-- The UI shows per-component diagnostics as `raw hits / kept / filtered`, so reviewers can distinguish scanner misses from post-filtered findings.
+- The UI shows per-component diagnostics as `raw hits / kept / filtered`; filtered SkillSpector findings are available in a collapsed raw-details section but do not affect scoring or the final conclusion.
 
 In other words, this module is closer to **"malicious skill risk"** than generic linting or code-quality review.
 

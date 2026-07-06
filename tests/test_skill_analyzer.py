@@ -483,6 +483,11 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
         self.assertIn("SkillSpector 原始命中: 2", components_html)
         self.assertIn("最终保留: 1", components_html)
         self.assertIn("已过滤: 1", components_html)
+        self.assertIn("已过滤的原始命中", components_html)
+        self.assertIn("不参与评分", components_html)
+        self.assertIn("PE3", components_html)
+        self.assertIn("Credential path appears in documentation.", components_html)
+        self.assertIn("A filtered false positive.", components_html)
 
 
 if __name__ == "__main__":

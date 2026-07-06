@@ -590,6 +590,11 @@ class SkillAnalyzer:
             issue for issue in raw_issues
             if self._issue_matches_component(issue, path)
         ]
+        related_keys = {self._issue_identity_key(issue) for issue in related}
+        filtered_related = [
+            issue for issue in raw_related
+            if self._issue_identity_key(issue) not in related_keys
+        ]
 
         raw_risk_score = self._compute_issue_score(related, bool(comp.get("executable")))
         display_score = max(0, min(100, 100 - raw_risk_score))
@@ -608,10 +613,20 @@ class SkillAnalyzer:
             "recommendation": recommendation,
             "dimensions": dimensions,
             "issues": related,
+            "filtered_issues": filtered_related,
             "raw_issue_count": len(raw_related),
             "kept_issue_count": len(related),
-            "filtered_issue_count": max(0, len(raw_related) - len(related)),
+            "filtered_issue_count": len(filtered_related),
         }
+
+    def _issue_identity_key(self, issue: dict[str, Any]) -> tuple[str, str, str, str]:
+        location = issue.get("location") or {}
+        return (
+            str(issue.get("id") or issue.get("rule_id") or ""),
+            str(location.get("file", "")),
+            str(location.get("start_line", "")),
+            str(issue.get("finding") or issue.get("explanation") or issue.get("message") or ""),
+        )
 
     def _issue_matches_component(self, issue: dict[str, Any], component_path: str) -> bool:
         issue_path = self._normalize_report_path(str((issue.get("location") or {}).get("file", "")))
@@ -648,6 +663,7 @@ class SkillAnalyzer:
         )
 
         issue_detail = self._render_component_issues(issues, en)
+        filtered_issue_detail = self._render_filtered_component_issues(summary.get("filtered_issues", []), en)
         diagnostics = (
             f"SkillSpector raw hits: {summary['raw_issue_count']} · kept: {summary['kept_issue_count']} · filtered: {summary['filtered_issue_count']}"
             if en else
@@ -671,7 +687,23 @@ class SkillAnalyzer:
     <div style="margin:8px 0 4px 0;padding:6px 8px;border-radius:6px;background:#f1f5f9;color:#475569;font-size:11px;">🧪 {self._esc(diagnostics)}</div>
     <div style="padding:8px 0 6px 0;color:#64748b;font-weight:600;">{self._esc(issue_count_label)}</div>
     {issue_detail}
+    {filtered_issue_detail}
   </div>
+</details>"""
+
+    def _render_filtered_component_issues(self, issues: list[dict[str, Any]], en: bool) -> str:
+        if not issues:
+            return ""
+        title = (
+            f"Filtered SkillSpector findings ({len(issues)}) — excluded from score/final conclusion"
+            if en else
+            f"已过滤的原始命中（{len(issues)}）— 不参与评分 / 最终结论"
+        )
+        body = self._render_component_issues(issues, en)
+        return f"""
+<details style="margin-top:8px;border:1px dashed #cbd5e1;border-radius:6px;background:#f8fafc;">
+  <summary style="cursor:pointer;padding:7px 8px;color:#64748b;font-weight:700;list-style:none;">{self._esc(title)}</summary>
+  <div style="padding:0 8px 8px 8px;border-top:1px dashed #cbd5e1;">{body}</div>
 </details>"""
 
     def _render_component_issues(self, issues: list[dict[str, Any]], en: bool) -> str:
@@ -696,6 +728,7 @@ class SkillAnalyzer:
             location = issue.get("location") or {}
             file_path = str(location.get("file", ""))
             line = location.get("start_line")
+            finding = issue.get("finding") or ""
             explanation = issue.get("explanation") or issue.get("message") or ""
             remediation = issue.get("remediation") or ""
             snippet = issue.get("code_snippet") or ""
@@ -712,6 +745,7 @@ class SkillAnalyzer:
                 + (f"<div style='margin-top:4px;color:#475569;'><b>{'File' if en else '文件'}:</b> {self._esc(file_path)}</div>" if file_path else "")
                 + (f"<div style='margin-top:4px;color:#475569;'><b>{'Line' if en else '行号'}:</b> {self._esc(str(line))}</div>" if line else "")
                 + (f"<div style='margin-top:4px;color:#475569;'><b>{'Confidence' if en else '置信度'}:</b> {confidence_str}</div>" if confidence is not None else "")
+                + (f"<div style='margin-top:6px;color:#334155;line-height:1.6;'><b>{'Finding' if en else '命中结论'}:</b> {self._esc(str(finding))}</div>" if finding else "")
                 + (f"<div style='margin-top:6px;color:#334155;line-height:1.6;'><b>{'Issue' if en else '问题'}:</b> {self._esc(str(explanation))}</div>" if explanation else "")
                 + (f"<div style='margin-top:6px;color:#334155;line-height:1.6;'><b>{'Recommendation' if en else '修复建议'}:</b> {self._esc(str(remediation))}</div>" if remediation else "")
                 + (f"<div style='margin-top:6px;'><div style='font-weight:600;color:#475569;margin-bottom:3px;'>{'Code Snippet' if en else '代码片段'}</div><div style='font-family:monospace;background:#fff;border:1px solid #e2e8f0;border-radius:4px;padding:6px;white-space:pre-wrap;word-break:break-all;color:#1e293b;'>{self._esc(str(snippet))}</div></div>" if snippet else "")
