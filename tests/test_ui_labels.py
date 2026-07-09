@@ -46,6 +46,12 @@ class UiLabelTests(unittest.TestCase):
         ]:
             self.assertIn(expected, readme)
 
+    def test_progress_rows_can_render_execution_details(self):
+        index_html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("prog-detail-", index_html)
+        self.assertIn("progress_detail", index_html)
+
 
 if __name__ == "__main__":
     unittest.main()

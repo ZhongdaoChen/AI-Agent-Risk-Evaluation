@@ -38,6 +38,30 @@ class SseHeartbeatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]["result"]["risk_level"], "UNKNOWN")
         self.assertIn("Analysis failed", events[-1]["result"]["summary"])
 
+    async def test_yields_progress_detail_events_from_queue(self):
+        progress_queue = asyncio.Queue()
+        await progress_queue.put({
+            "type": "progress_detail",
+            "phase": "skill",
+            "name": "Skill",
+            "detail": "Running SkillSpector CLI scan",
+        })
+
+        events = []
+        async for event in run_analyzer_with_heartbeat(
+            "skill",
+            "Skill",
+            SlowAnalyzer(),
+            "en",
+            heartbeat_interval=0.01,
+            progress_queue=progress_queue,
+        ):
+            events.append(event)
+
+        self.assertEqual(events[0]["type"], "progress_detail")
+        self.assertEqual(events[0]["detail"], "Running SkillSpector CLI scan")
+        self.assertEqual(events[-1]["event"], "result")
+
 
 class StreamHeartbeatTests(unittest.IsolatedAsyncioTestCase):
     async def test_stream_analysis_yields_heartbeat_events(self):

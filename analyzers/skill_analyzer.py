@@ -47,10 +47,11 @@ class SkillAnalyzer:
     }
     MALICIOUS_RULE_PREFIXES = ("AST", "MCP", "TP")
 
-    def __init__(self, owner: str, repo: str, token: str = None, lang: str = "zh"):
+    def __init__(self, owner: str, repo: str, token: str = None, lang: str = "zh", progress_callback=None):
         self.owner = owner
         self.repo = repo
         self.lang = lang
+        self.progress_callback = progress_callback
         self.headers = {
             "Accept": "application/vnd.github.v3+json",
             "User-Agent": "AI-Risk-Evaluator/1.0",
@@ -58,14 +59,40 @@ class SkillAnalyzer:
         if token:
             self.headers["Authorization"] = f"token {token}"
 
+    async def _emit_progress(self, detail_en: str, detail_zh: str) -> None:
+        if not self.progress_callback:
+            return
+        detail = detail_en if self.lang == "en" else detail_zh
+        await self.progress_callback(detail)
+
     async def analyze(self) -> dict:
         temp_root: str | None = None
         try:
+            await self._emit_progress(
+                "Downloading repository snapshot",
+                "下载 GitHub 仓库快照",
+            )
             temp_root, repo_dir = await self._download_repo_snapshot()
+            await self._emit_progress(
+                "Running SkillSpector static/AST/YARA scan",
+                "执行 SkillSpector 静态 / AST / YARA 扫描",
+            )
             report = await self._run_skillspector(repo_dir)
+            await self._emit_progress(
+                "Reviewing SkillSpector findings for false positives and malicious intent",
+                "调用 LLM / 启发式规则判断 SkillSpector 命中是否误报及是否恶意",
+            )
             filtered_issues = await self._select_malicious_issues(report, repo_dir)
             if self.lang != "en":
+                await self._emit_progress(
+                    "Localizing retained Skill findings",
+                    "本地化最终保留的 Skill 发现",
+                )
                 filtered_issues = await self._localize_issues_for_display(filtered_issues)
+            await self._emit_progress(
+                "Rendering Skill Security Quality result",
+                "渲染 Skill 安全质量结果",
+            )
             return self._render_result(report, repo_dir, filtered_issues)
         except Exception as e:
             return self._error_result(str(e))
@@ -75,10 +102,18 @@ class SkillAnalyzer:
 
     async def _download_repo_snapshot(self) -> tuple[str, str]:
         async with httpx.AsyncClient(headers=self.headers, timeout=60, follow_redirects=True) as gh:
+            await self._emit_progress(
+                "Fetching repository metadata from GitHub",
+                "从 GitHub 获取仓库元数据",
+            )
             repo_meta = await gh.get(f"{self.GITHUB_BASE}/repos/{self.owner}/{self.repo}")
             repo_meta.raise_for_status()
             default_branch = repo_meta.json().get("default_branch", "main")
 
+            await self._emit_progress(
+                "Downloading repository ZIP archive",
+                "下载仓库 ZIP 快照",
+            )
             zip_resp = await gh.get(
                 f"{self.GITHUB_BASE}/repos/{self.owner}/{self.repo}/zipball/{default_branch}"
             )
@@ -88,6 +123,10 @@ class SkillAnalyzer:
         zip_path = Path(temp_root) / "repo.zip"
         zip_path.write_bytes(zip_resp.content)
 
+        await self._emit_progress(
+            "Extracting repository snapshot",
+            "解压仓库快照",
+        )
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(temp_root)
 
@@ -125,15 +164,27 @@ class SkillAnalyzer:
             else:
                 cmd.append("--no-llm")
 
+            await self._emit_progress(
+                "Starting SkillSpector CLI scan",
+                "启动 SkillSpector CLI 扫描",
+            )
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
             )
+            await self._emit_progress(
+                "SkillSpector scan is running",
+                "SkillSpector 正在扫描",
+            )
             stdout, stderr = await proc.communicate()
 
             if report_path.exists():
+                await self._emit_progress(
+                    "Parsing SkillSpector JSON report",
+                    "解析 SkillSpector JSON 报告",
+                )
                 return json.loads(report_path.read_text(encoding="utf-8"))
 
             stderr_text = stderr.decode("utf-8", errors="ignore").strip()
@@ -160,6 +211,10 @@ class SkillAnalyzer:
 
         qwen_key = os.getenv("QWEN_API_KEY", "")
         if not qwen_key:
+            await self._emit_progress(
+                "Applying heuristic malicious-intent filter because QWEN_API_KEY is not configured",
+                "未配置 QWEN_API_KEY，使用启发式规则过滤恶意意图",
+            )
             return self._filter_malicious_issues_heuristic(candidates)
 
         prompt_items = []
@@ -181,6 +236,10 @@ class SkillAnalyzer:
         system_prompt, user_prompt = self._build_intent_review_prompt(prompt_items)
 
         try:
+            await self._emit_progress(
+                "Calling LLM to review false positives and malicious intent",
+                "调用 LLM 判断误报与恶意意图",
+            )
             client = AsyncOpenAI(api_key=qwen_key, base_url=self.QWEN_OPENAI_BASE)
             resp = await client.chat.completions.create(
                 model=self.INTENT_MODEL,
@@ -201,8 +260,16 @@ class SkillAnalyzer:
                     issue = dict(issue)
                     issue.update(keep_map[idx])
                     kept.append(issue)
+            await self._emit_progress(
+                "Finished LLM false-positive review",
+                "完成 LLM 误报复核",
+            )
             return self._enforce_malicious_intent_policy(kept)
         except Exception:
+            await self._emit_progress(
+                "LLM review failed; applying heuristic malicious-intent filter",
+                "LLM 复核失败，改用启发式规则过滤恶意意图",
+            )
             return self._filter_malicious_issues_heuristic(candidates)
 
     def _is_relevant_skillspector_rule(self, issue: dict[str, Any]) -> bool:

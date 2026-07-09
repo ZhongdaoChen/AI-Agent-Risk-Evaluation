@@ -209,17 +209,37 @@ async def run_analyzer_with_heartbeat(
     analyzer,
     lang: str,
     heartbeat_interval: float = HEARTBEAT_INTERVAL_SECONDS,
+    progress_queue: asyncio.Queue | None = None,
 ) -> AsyncGenerator[dict, None]:
     task = asyncio.create_task(analyzer.analyze())
+    progress_task = asyncio.create_task(progress_queue.get()) if progress_queue else None
+    heartbeat_task = asyncio.create_task(asyncio.sleep(heartbeat_interval))
     try:
         while True:
-            done, _ = await asyncio.wait({task}, timeout=heartbeat_interval)
+            wait_for = {task, heartbeat_task}
+            if progress_task:
+                wait_for.add(progress_task)
+            done, _ = await asyncio.wait(wait_for, return_when=asyncio.FIRST_COMPLETED)
+            if progress_task and progress_task in done:
+                yield progress_task.result()
+                progress_task = asyncio.create_task(progress_queue.get()) if progress_queue else None
             if task in done:
                 break
-            yield {"type": "heartbeat", "phase": key, "name": name, "status": "running"}
+            if heartbeat_task in done:
+                yield {"type": "heartbeat", "phase": key, "name": name, "status": "running"}
+                heartbeat_task = asyncio.create_task(asyncio.sleep(heartbeat_interval))
+        if progress_task:
+            progress_task.cancel()
+        heartbeat_task.cancel()
+        if progress_queue:
+            while not progress_queue.empty():
+                yield progress_queue.get_nowait()
         result = await task
     except asyncio.CancelledError:
         task.cancel()
+        if progress_task:
+            progress_task.cancel()
+        heartbeat_task.cancel()
         cancelled_msg = "Analysis cancelled (asyncio timeout/cancel)" if lang == "en" else "分析被取消 (asyncio timeout/cancel)"
         timeout_title = "Analysis timed out" if lang == "en" else "分析超时"
         result = {
@@ -230,6 +250,9 @@ async def run_analyzer_with_heartbeat(
             "metrics": {},
         }
     except Exception as e:
+        if progress_task:
+            progress_task.cancel()
+        heartbeat_task.cancel()
         failed_msg = f"Analysis failed: {str(e)[:120]}" if lang == "en" else f"分析失败: {str(e)[:120]}"
         error_title = "Analysis error" if lang == "en" else "分析出错"
         result = {
@@ -283,9 +306,25 @@ async def stream_analysis(url: str, token: Optional[str], lang: str = "zh",
 
     for key, name, analyzer in analyzers:
         yield sse({"type": "progress", "phase": key, "name": name, "status": "running"})
+        progress_queue = None
+        if key == "skill":
+            progress_queue = asyncio.Queue()
+
+            async def progress_callback(detail: str, *, phase=key, module_name=name, queue=progress_queue):
+                await queue.put({
+                    "type": "progress_detail",
+                    "phase": phase,
+                    "name": module_name,
+                    "detail": detail,
+                })
+
+            analyzer.progress_callback = progress_callback
         result = None
-        async for event in run_analyzer_with_heartbeat(key, name, analyzer, lang):
+        async for event in run_analyzer_with_heartbeat(key, name, analyzer, lang, progress_queue=progress_queue):
             if event.get("type") == "heartbeat":
+                yield sse(event)
+                continue
+            if event.get("type") == "progress_detail":
                 yield sse(event)
                 continue
             if event.get("event") == "result":

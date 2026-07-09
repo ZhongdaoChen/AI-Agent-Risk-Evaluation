@@ -1,5 +1,6 @@
 import unittest
 import inspect
+from unittest.mock import AsyncMock
 
 from analyzers.skill_analyzer import SkillAnalyzer
 
@@ -10,6 +11,12 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
 
     def test_malicious_intent_filter_uses_qwen_plus(self):
         self.assertEqual(self.analyzer.INTENT_MODEL, "qwen-plus")
+
+    def test_accepts_progress_callback_argument(self):
+        callback = AsyncMock()
+        analyzer = SkillAnalyzer("owner", "repo", progress_callback=callback)
+
+        self.assertIs(analyzer.progress_callback, callback)
 
     def test_malicious_intent_prompt_defaults_to_false_positive_reduction(self):
         source = inspect.getsource(SkillAnalyzer._build_intent_review_prompt)
@@ -488,6 +495,35 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
         self.assertIn("PE3", components_html)
         self.assertIn("Credential path appears in documentation.", components_html)
         self.assertIn("A filtered false positive.", components_html)
+
+
+class SkillAnalyzerProgressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_analyze_emits_skill_progress_details(self):
+        details = []
+
+        async def progress_callback(detail):
+            details.append(detail)
+
+        analyzer = SkillAnalyzer("owner", "repo", lang="en", progress_callback=progress_callback)
+        analyzer._download_repo_snapshot = AsyncMock(return_value=("/tmp/root", "/tmp/repo"))
+        analyzer._run_skillspector = AsyncMock(return_value={"issues": [], "components": [], "risk_assessment": {}, "metadata": {}})
+        analyzer._select_malicious_issues = AsyncMock(return_value=[])
+        analyzer._render_result = lambda report, repo_dir, issues: {
+            "score": 100,
+            "risk_level": "LOW",
+            "summary": "ok",
+            "findings": [],
+            "metrics": {},
+        }
+
+        result = await analyzer.analyze()
+
+        self.assertEqual(result["summary"], "ok")
+        joined = " ".join(details)
+        self.assertIn("Downloading repository snapshot", joined)
+        self.assertIn("Running SkillSpector", joined)
+        self.assertIn("Reviewing SkillSpector findings", joined)
+        self.assertIn("Rendering Skill Security Quality result", joined)
 
 
 if __name__ == "__main__":

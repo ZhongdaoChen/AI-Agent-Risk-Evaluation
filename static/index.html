@@ -868,7 +868,10 @@ function startAnalysis() {
     el.className = 'flex items-center gap-3 p-3 rounded-lg bg-gray-50';
     el.innerHTML = `
       <span class="text-lg">${meta.icon}</span>
-      <span class="flex-1 text-sm text-gray-600">${meta.label}</span>
+      <span class="flex-1 min-w-0">
+        <span class="block text-sm text-gray-600">${meta.label}</span>
+        <span id="prog-detail-${key}" class="hidden block text-xs text-gray-400 mt-1 truncate"></span>
+      </span>
       <span id="prog-status-${key}" class="text-xs text-gray-400">${STRINGS[currentLang].waitingStatus}</span>
     `;
     document.getElementById('progressItems').appendChild(el);
@@ -918,6 +921,14 @@ function handleEvent(data) {
     const st = document.getElementById(`prog-status-${data.phase}`);
     if (el) el.className = 'flex items-center gap-3 p-3 rounded-lg bg-indigo-50';
     if (st) st.innerHTML = STRINGS[currentLang].runningStatus;
+  }
+
+  if (data.type === 'progress_detail') {
+    const detail = document.getElementById(`prog-detail-${data.phase}`);
+    if (detail && data.detail) {
+      detail.textContent = data.detail;
+      detail.classList.remove('hidden');
+    }
   }
 
   if (data.type === 'result') {
