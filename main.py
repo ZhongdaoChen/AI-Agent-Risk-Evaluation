@@ -200,6 +200,48 @@ def normalize_selected_modules(modules: Optional[str]) -> list[str]:
     return selected
 
 
+HEARTBEAT_INTERVAL_SECONDS = 10.0
+
+
+async def run_analyzer_with_heartbeat(
+    key: str,
+    name: str,
+    analyzer,
+    lang: str,
+    heartbeat_interval: float = HEARTBEAT_INTERVAL_SECONDS,
+) -> AsyncGenerator[dict, None]:
+    task = asyncio.create_task(analyzer.analyze())
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=heartbeat_interval)
+            if task in done:
+                break
+            yield {"type": "heartbeat", "phase": key, "name": name, "status": "running"}
+        result = await task
+    except asyncio.CancelledError:
+        task.cancel()
+        cancelled_msg = "Analysis cancelled (asyncio timeout/cancel)" if lang == "en" else "分析被取消 (asyncio timeout/cancel)"
+        timeout_title = "Analysis timed out" if lang == "en" else "分析超时"
+        result = {
+            "score": 50,
+            "risk_level": "UNKNOWN",
+            "summary": cancelled_msg,
+            "findings": [{"type": "INFO", "title": timeout_title, "detail": f"{key} analyzer was cancelled"}],
+            "metrics": {},
+        }
+    except Exception as e:
+        failed_msg = f"Analysis failed: {str(e)[:120]}" if lang == "en" else f"分析失败: {str(e)[:120]}"
+        error_title = "Analysis error" if lang == "en" else "分析出错"
+        result = {
+            "score": 50,
+            "risk_level": "UNKNOWN",
+            "summary": failed_msg,
+            "findings": [{"type": "INFO", "title": error_title, "detail": str(e)[:200]}],
+            "metrics": {},
+        }
+    yield {"event": "result", "result": result}
+
+
 async def stream_analysis(url: str, token: Optional[str], lang: str = "zh",
                           selected_modules: Optional[list[str]] = None) -> AsyncGenerator[str, None]:
     def sse(data: dict) -> str:
@@ -241,27 +283,19 @@ async def stream_analysis(url: str, token: Optional[str], lang: str = "zh",
 
     for key, name, analyzer in analyzers:
         yield sse({"type": "progress", "phase": key, "name": name, "status": "running"})
-        try:
-            result = await analyzer.analyze()
-        except asyncio.CancelledError:
-            # CancelledError is BaseException in Python 3.8+ — must catch explicitly
-            cancelled_msg = "Analysis cancelled (asyncio timeout/cancel)" if lang == "en" else "分析被取消 (asyncio timeout/cancel)"
-            timeout_title = "Analysis timed out" if lang == "en" else "分析超时"
+        result = None
+        async for event in run_analyzer_with_heartbeat(key, name, analyzer, lang):
+            if event.get("type") == "heartbeat":
+                yield sse(event)
+                continue
+            if event.get("event") == "result":
+                result = event["result"]
+        if result is None:
             result = {
                 "score": 50,
                 "risk_level": "UNKNOWN",
-                "summary": cancelled_msg,
-                "findings": [{"type": "INFO", "title": timeout_title, "detail": f"{key} analyzer was cancelled"}],
-                "metrics": {},
-            }
-        except Exception as e:
-            failed_msg = f"Analysis failed: {str(e)[:120]}" if lang == "en" else f"分析失败: {str(e)[:120]}"
-            error_title = "Analysis error" if lang == "en" else "分析出错"
-            result = {
-                "score": 50,
-                "risk_level": "UNKNOWN",
-                "summary": failed_msg,
-                "findings": [{"type": "INFO", "title": error_title, "detail": str(e)[:200]}],
+                "summary": "Analysis ended without result" if lang == "en" else "分析未返回结果",
+                "findings": [],
                 "metrics": {},
             }
         if key in NON_LLM:

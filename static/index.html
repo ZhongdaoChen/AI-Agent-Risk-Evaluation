@@ -882,6 +882,9 @@ function startAnalysis() {
 
   es.onmessage = (e) => {
     const data = JSON.parse(e.data);
+    if (data.type === 'heartbeat') {
+      return;
+    }
     handleEvent(data);
     if (data.type === 'complete' || data.type === 'error') {
       es.close();

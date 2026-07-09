@@ -260,6 +260,8 @@ Returns whether a default GitHub token is configured.
 
 Streams analysis results over SSE.
 
+During long-running modules, the backend emits heartbeat events so reverse proxies do not treat the stream as idle. When deploying behind Nginx, SLB, or another gateway, still disable proxy buffering and use a long read timeout for this route.
+
 Query parameters:
 
 - `url` — GitHub repository URL
