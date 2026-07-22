@@ -52,6 +52,18 @@ class UiLabelTests(unittest.TestCase):
         self.assertIn("prog-detail-", index_html)
         self.assertIn("progress_detail", index_html)
 
+    def test_default_token_warning_keeps_manual_token_input_visible(self):
+        index_html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('id="tokenSection" class="mt-2"', index_html)
+        self.assertIn("text-yellow-600", index_html)
+        self.assertIn("fa-triangle-exclamation", index_html)
+        self.assertIn(
+            "Default token doesn't have read permission to adidas internal repos.",
+            index_html,
+        )
+        self.assertNotIn("Default token configured — no manual entry needed", index_html)
+
 
 if __name__ == "__main__":
     unittest.main()
