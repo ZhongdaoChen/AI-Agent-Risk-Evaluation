@@ -96,6 +96,27 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
         )
         self.assertIn("If is_false_positive=true", system_prompt)
 
+    def test_llm_prompt_requires_structured_filter_logic_chain(self):
+        system_prompt, user_prompt = self.analyzer._build_intent_review_prompt([
+            {
+                "index": 0,
+                "rule_id": "PE3",
+                "category": "Privilege Escalation",
+                "severity": "HIGH",
+                "file": "README.md",
+                "finding": "Credential path appears in documentation.",
+                "explanation": "Scanner explanation",
+                "code_snippet": ".env",
+                "file_excerpt": "Configuration table documents .env usage.",
+            }
+        ])
+
+        self.assertIn("filter_logic_chain", system_prompt)
+        self.assertIn("SkillSpector original claim", system_prompt)
+        self.assertIn("why the file is non-malicious", system_prompt)
+        self.assertIn("missing malicious data flow", system_prompt)
+        self.assertIn("filter_logic_chain", user_prompt)
+
     def test_build_llm_keep_map_ignores_false_positive_before_malicious_gate(self):
         decisions = [
             {
@@ -131,6 +152,71 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
         self.assertEqual(keep_map[2]["intent"], "Reads token and posts it to an external webhook.")
         self.assertEqual(keep_map[2]["llm_risk_verdict"], "real_risk")
         self.assertEqual(keep_map[2]["llm_final_risk"], "HIGH")
+
+    def test_build_llm_review_maps_preserves_filtered_candidate_reasons(self):
+        decisions = [
+            {
+                "index": 0,
+                "is_real_risk": False,
+                "is_false_positive": True,
+                "malicious_intent": False,
+                "final_risk": "LOW",
+                "confidence": "high",
+                "classification": "false_positive",
+                "reason": "The credential path appears only in documentation.",
+                "filter_logic_chain": [
+                    "SkillSpector flagged credential access because .env appears in the file.",
+                    "The file excerpt is a README configuration table, not executable skill code.",
+                    "The text documents where users configure credentials for the declared service.",
+                    "There is no source -> operation -> destination flow that sends secrets out.",
+                    "Therefore the finding is a documentation false positive and not malicious High/Critical.",
+                ],
+            },
+            {
+                "index": 1,
+                "is_real_risk": True,
+                "is_false_positive": False,
+                "malicious_intent": False,
+                "final_risk": "HIGH",
+                "confidence": "medium",
+                "classification": "benign_security_hygiene",
+                "reason": "Dangerous API use exists, but there is no malicious data flow.",
+                "filter_logic_chain": [
+                    "SkillSpector flagged dangerous API use.",
+                    "The code uses the API for the declared local operation.",
+                    "No hidden payload, persistence, or unrelated sensitive action is present.",
+                    "The required malicious source -> operation -> destination chain is absent.",
+                    "Therefore this is benign security hygiene, not malicious intent.",
+                ],
+            },
+            {
+                "index": 2,
+                "is_real_risk": True,
+                "is_false_positive": False,
+                "malicious_intent": True,
+                "final_risk": "HIGH",
+                "confidence": "high",
+                "classification": "malicious",
+                "reason": "Reads token and posts it to an external webhook.",
+            },
+        ]
+
+        keep_map, filter_map = self.analyzer._build_llm_review_maps(decisions)
+
+        self.assertEqual(set(keep_map), {2})
+        self.assertEqual(set(filter_map), {0, 1})
+        self.assertEqual(filter_map[0]["llm_filter_reason"], "The credential path appears only in documentation.")
+        self.assertEqual(filter_map[0]["llm_risk_verdict"], "false_positive")
+        self.assertEqual(filter_map[0]["llm_classification"], "false_positive")
+        self.assertEqual(filter_map[0]["llm_final_risk"], "LOW")
+        self.assertEqual(filter_map[0]["llm_confidence"], "high")
+        self.assertEqual(len(filter_map[0]["llm_filter_logic_chain"]), 5)
+        self.assertIn("README configuration table", filter_map[0]["llm_filter_logic_chain"][1])
+        self.assertEqual(filter_map[1]["llm_filter_reason"], "Dangerous API use exists, but there is no malicious data flow.")
+        self.assertEqual(filter_map[1]["llm_risk_verdict"], "real_risk")
+        self.assertEqual(filter_map[1]["llm_classification"], "benign_security_hygiene")
+        self.assertEqual(filter_map[1]["llm_final_risk"], "HIGH")
+        self.assertIn("source -> operation -> destination chain is absent", filter_map[1]["llm_filter_logic_chain"][3])
 
     def test_build_llm_keep_map_ignores_real_risk_when_final_risk_is_medium(self):
         decisions = [
@@ -495,6 +581,133 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
         self.assertIn("PE3", components_html)
         self.assertIn("Credential path appears in documentation.", components_html)
         self.assertIn("A filtered false positive.", components_html)
+
+    def test_filtered_component_issues_render_llm_filter_reason_only_when_present(self):
+        reviewed_filtered = {
+            "id": "PE3",
+            "severity": "HIGH",
+            "category": "Privilege Escalation",
+            "location": {"file": "skills/billing/SKILL.md", "start_line": 12},
+            "finding": "Credential path appears in documentation.",
+            "explanation": "A filtered false positive.",
+            "code_snippet": ".env",
+            "llm_filter_reason": "LLM determined this is a documentation-only credential path.",
+            "llm_risk_verdict": "false_positive",
+            "llm_classification": "false_positive",
+            "llm_final_risk": "LOW",
+            "llm_confidence": "high",
+            "llm_filter_logic_chain": [
+                "SkillSpector flagged .env as possible credential access.",
+                "The file is documentation showing configuration variables.",
+                "The snippet does not instruct the agent to read or transmit secrets.",
+                "There is no source -> operation -> destination exfiltration path.",
+                "This is a documentation false positive, not malicious intent.",
+            ],
+        }
+        unreviewed_filtered = {
+            "id": "SC1",
+            "severity": "LOW",
+            "category": "Supply Chain",
+            "location": {"file": "skills/billing/SKILL.md", "start_line": 20},
+            "finding": "Dependency is not pinned.",
+            "explanation": "Low severity raw hit that was not sent to LLM.",
+            "code_snippet": "requests>=2",
+        }
+
+        html = self.analyzer._render_filtered_component_issues(
+            [reviewed_filtered, unreviewed_filtered],
+            en=False,
+        )
+
+        self.assertIn("LLM过滤理由", html)
+        self.assertIn("LLM过滤逻辑链", html)
+        self.assertIn("SkillSpector flagged .env as possible credential access.", html)
+        self.assertIn("There is no source -&gt; operation -&gt; destination exfiltration path.", html)
+        self.assertIn("LLM determined this is a documentation-only credential path.", html)
+        self.assertIn("false_positive", html)
+        self.assertIn("LOW", html)
+        self.assertIn("high", html)
+        self.assertIn("Low severity raw hit that was not sent to LLM.", html)
+        self.assertEqual(html.count("LLM过滤理由"), 1)
+
+    def test_component_summary_adds_local_filter_reasons_for_unreviewed_raw_hits(self):
+        kept_issue = {
+            "id": "E2",
+            "severity": "HIGH",
+            "category": "Data Exfiltration",
+            "location": {"file": "skills/billing/SKILL.md", "start_line": 33},
+            "finding": "Malicious exfiltration",
+            "explanation": "Steals .env and sends it out.",
+        }
+        low_severity = {
+            "id": "E2",
+            "severity": "LOW",
+            "category": "Data Exfiltration",
+            "location": {"file": "skills/billing/SKILL.md", "start_line": 12},
+            "finding": "Low severity hit",
+            "explanation": "Not high enough for LLM review.",
+        }
+        blocked_rule = {
+            "id": "SC1",
+            "severity": "HIGH",
+            "category": "Supply Chain",
+            "location": {"file": "skills/billing/SKILL.md", "start_line": 20},
+            "finding": "Dependency is not pinned.",
+            "explanation": "Rule is outside the malicious-intent review allowlist.",
+        }
+        comp = {
+            "path": "skills/billing",
+            "type": "skill",
+            "lines": 80,
+            "executable": False,
+        }
+
+        summary = self.analyzer._build_component_summary(
+            comp,
+            [kept_issue],
+            [kept_issue, low_severity, blocked_rule],
+            en=False,
+        )
+
+        reasons = {
+            issue["id"]: issue.get("filter_reason")
+            for issue in summary["filtered_issues"]
+        }
+        self.assertIn("严重度为 LOW", reasons["E2"])
+        self.assertIn("不属于高危/严重候选项", reasons["E2"])
+        self.assertIn("规则 SC1 不在当前恶意意图复核 allowlist 中", reasons["SC1"])
+
+    def test_filtered_component_issues_render_local_filter_reason_for_every_unreviewed_hit(self):
+        low_severity = {
+            "id": "E2",
+            "severity": "LOW",
+            "category": "Data Exfiltration",
+            "location": {"file": "skills/billing/SKILL.md", "start_line": 12},
+            "finding": "Low severity hit",
+            "explanation": "Not high enough for LLM review.",
+            "filter_reason": "未送 LLM：严重度为 LOW，不属于高危/严重候选项。",
+            "filter_reason_source": "local",
+        }
+        blocked_rule = {
+            "id": "SC1",
+            "severity": "HIGH",
+            "category": "Supply Chain",
+            "location": {"file": "skills/billing/SKILL.md", "start_line": 20},
+            "finding": "Dependency is not pinned.",
+            "explanation": "Rule is outside the malicious-intent review allowlist.",
+            "filter_reason": "未送 LLM：规则 SC1 不在当前恶意意图复核 allowlist 中。",
+            "filter_reason_source": "local",
+        }
+
+        html = self.analyzer._render_filtered_component_issues(
+            [low_severity, blocked_rule],
+            en=False,
+        )
+
+        self.assertEqual(html.count("过滤原因"), 2)
+        self.assertIn("严重度为 LOW", html)
+        self.assertIn("规则 SC1 不在当前恶意意图复核 allowlist 中", html)
+        self.assertNotIn("LLM过滤理由", html)
 
 
 class SkillAnalyzerProgressTests(unittest.IsolatedAsyncioTestCase):

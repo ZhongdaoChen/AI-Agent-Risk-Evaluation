@@ -253,13 +253,15 @@ class SkillAnalyzer:
             raw = (resp.choices[0].message.content or "").strip()
             data = json.loads(raw)
             decisions = data.get("decisions", []) or []
-            keep_map = self._build_llm_keep_map(decisions)
+            keep_map, filter_map = self._build_llm_review_maps(decisions)
             kept: list[dict[str, Any]] = []
             for idx, issue in enumerate(candidates):
                 if idx in keep_map:
                     issue = dict(issue)
                     issue.update(keep_map[idx])
                     kept.append(issue)
+                elif idx in filter_map:
+                    issue.update(filter_map[idx])
             await self._emit_progress(
                 "Finished LLM false-positive review",
                 "完成 LLM 误报复核",
@@ -299,6 +301,12 @@ class SkillAnalyzer:
             "steals secrets/credentials/tokens, exfiltrates data to an external destination, downloads or executes hidden/remote payloads, "
             "establishes persistence/backdoors, or performs sensitive actions unrelated to the declared skill purpose. "
             "For malicious_intent=true, cite the exact data flow as source -> operation -> destination; if you cannot identify all three, return false. "
+            "For every filtered candidate, fill filter_logic_chain with 5 specific evidence-based steps: "
+            "1) SkillSpector original claim, 2) what the file/code evidence actually shows, "
+            "3) why the file is non-malicious in context, 4) what malicious data flow or behavior is missing, "
+            "5) the final reason it is excluded from malicious High/Critical findings. "
+            "The chain must be concrete to this file and must not use generic phrases such as 'not selected' without evidence. "
+            "For false positives or benign findings, explicitly explain the missing malicious data flow: source -> operation -> destination, hidden payload, persistence, or unrelated sensitive action. "
             "You must also analyze whether the scanner severity is overestimated. "
             "Only keep findings whose final_risk is HIGH or CRITICAL; if final_risk is LOW or MEDIUM, set malicious_intent=false. "
             "Return strict JSON only."
@@ -317,6 +325,13 @@ class SkillAnalyzer:
                         "confidence": "low|medium|high",
                         "classification": "false_positive|malicious|benign_security_hygiene|insufficient_evidence",
                         "reason": "Explain whether SkillSpector's conclusion is a real risk or a false positive, then explain malicious intent if present.",
+                        "filter_logic_chain": [
+                            "SkillSpector original claim: <specific scanner conclusion>",
+                            "Evidence observed in this file: <specific code/text evidence>",
+                            "Non-malicious context: <why the file/code is benign, documentation, configuration, declared behavior, or ordinary hygiene>",
+                            "Missing malicious evidence: <state which source -> operation -> destination, hidden payload, persistence, or unrelated sensitive action is absent>",
+                            "Final exclusion decision: <why this is not malicious High/Critical>",
+                        ],
                         "required_evidence": {
                             "source": "",
                             "operation": "",
@@ -330,30 +345,70 @@ class SkillAnalyzer:
         return system_prompt, user_prompt
 
     def _build_llm_keep_map(self, decisions: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
-        keep: dict[int, dict[str, str]] = {}
+        keep, _ = self._build_llm_review_maps(decisions)
+        return keep
+
+    def _build_llm_review_maps(
+        self,
+        decisions: list[dict[str, Any]],
+    ) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
+        keep: dict[int, dict[str, Any]] = {}
+        filtered: dict[int, dict[str, Any]] = {}
         for item in decisions or []:
             if not isinstance(item, dict):
-                continue
-            if item.get("is_real_risk") is not True:
-                continue
-            if item.get("is_false_positive") is True:
-                continue
-            if item.get("malicious_intent") is not True:
-                continue
-            final_risk = str(item.get("final_risk", "")).upper()
-            if final_risk not in {"HIGH", "CRITICAL"}:
                 continue
             try:
                 idx = int(item.get("index"))
             except (TypeError, ValueError):
                 continue
-            keep[idx] = {
-                "intent": str(item.get("reason", "")).strip(),
-                "llm_risk_verdict": "real_risk",
-                "llm_classification": str(item.get("classification", "malicious")).strip() or "malicious",
-                "llm_final_risk": final_risk,
+            is_real_risk = item.get("is_real_risk") is True
+            is_false_positive = item.get("is_false_positive") is True
+            malicious_intent = item.get("malicious_intent") is True
+            final_risk = str(item.get("final_risk", "")).upper()
+            classification = str(item.get("classification", "")).strip()
+            reason = str(item.get("reason", "")).strip()
+            confidence = str(item.get("confidence", "")).strip()
+            logic_chain = self._normalize_filter_logic_chain(item.get("filter_logic_chain"))
+
+            if (
+                is_real_risk
+                and not is_false_positive
+                and malicious_intent
+                and final_risk in {"HIGH", "CRITICAL"}
+            ):
+                keep[idx] = {
+                    "intent": reason,
+                    "llm_risk_verdict": "real_risk",
+                    "llm_classification": classification or "malicious",
+                    "llm_final_risk": final_risk,
+                }
+                continue
+
+            if is_false_positive:
+                verdict = "false_positive"
+            elif is_real_risk:
+                verdict = "real_risk"
+            else:
+                verdict = "not_real_risk"
+            filtered[idx] = {
+                "llm_filter_reason": reason,
+                "llm_risk_verdict": verdict,
+                "llm_classification": classification or "insufficient_evidence",
+                "llm_final_risk": final_risk or "LOW",
+                "llm_confidence": confidence,
+                "llm_is_false_positive": is_false_positive,
+                "llm_is_real_risk": is_real_risk,
+                "llm_malicious_intent": malicious_intent,
+                "llm_filter_logic_chain": logic_chain,
             }
-        return keep
+        return keep, filtered
+
+    def _normalize_filter_logic_chain(self, value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [line.strip(" -\t") for line in value.splitlines() if line.strip(" -\t")]
+        return []
 
     def _read_file_excerpt(self, repo_dir: str, file_path: str) -> str:
         if not file_path:
@@ -662,6 +717,10 @@ class SkillAnalyzer:
             issue for issue in raw_related
             if self._issue_identity_key(issue) not in related_keys
         ]
+        filtered_related = [
+            self._with_filter_reason(issue, en)
+            for issue in filtered_related
+        ]
 
         raw_risk_score = self._compute_issue_score(related, bool(comp.get("executable")))
         display_score = max(0, min(100, 100 - raw_risk_score))
@@ -694,6 +753,34 @@ class SkillAnalyzer:
             str(location.get("start_line", "")),
             str(issue.get("finding") or issue.get("explanation") or issue.get("message") or ""),
         )
+
+    def _with_filter_reason(self, issue: dict[str, Any], en: bool) -> dict[str, Any]:
+        if issue.get("llm_filter_reason") or issue.get("filter_reason"):
+            return issue
+        annotated = dict(issue)
+        severity = str(issue.get("severity", "LOW")).upper()
+        rule_id = str(issue.get("id") or issue.get("rule_id") or "").upper()
+        if severity not in {"HIGH", "CRITICAL"}:
+            reason = (
+                f"Not sent to LLM: severity is {severity}, so it is not a High/Critical malicious-intent candidate."
+                if en else
+                f"未送 LLM：严重度为 {severity}，不属于高危/严重候选项。"
+            )
+        elif not self._is_relevant_skillspector_rule(issue):
+            reason = (
+                f"Not sent to LLM: rule {rule_id or 'UNKNOWN'} is outside the current malicious-intent review allowlist."
+                if en else
+                f"未送 LLM：规则 {rule_id or 'UNKNOWN'} 不在当前恶意意图复核 allowlist 中。"
+            )
+        else:
+            reason = (
+                "Filtered out: it was not selected as a malicious High/Critical finding after review."
+                if en else
+                "已过滤：复核后未被选为恶意高危/严重发现。"
+            )
+        annotated["filter_reason"] = reason
+        annotated["filter_reason_source"] = "local"
+        return annotated
 
     def _issue_matches_component(self, issue: dict[str, Any], component_path: str) -> bool:
         issue_path = self._normalize_report_path(str((issue.get("location") or {}).get("file", "")))
@@ -799,6 +886,24 @@ class SkillAnalyzer:
             explanation = issue.get("explanation") or issue.get("message") or ""
             remediation = issue.get("remediation") or ""
             snippet = issue.get("code_snippet") or ""
+            llm_filter_reason = issue.get("llm_filter_reason")
+            filter_reason = issue.get("filter_reason")
+            llm_filter_logic_chain = [
+                str(item).strip()
+                for item in (issue.get("llm_filter_logic_chain") or [])
+                if str(item).strip()
+            ]
+            logic_chain_html = "".join(
+                f"<li style='margin:2px 0;'>{self._esc(item)}</li>"
+                for item in llm_filter_logic_chain
+            )
+            llm_meta = [
+                str(issue.get("llm_risk_verdict") or "").strip(),
+                str(issue.get("llm_classification") or "").strip(),
+                str(issue.get("llm_final_risk") or "").strip(),
+                str(issue.get("llm_confidence") or "").strip(),
+            ]
+            llm_meta_text = " · ".join(value for value in llm_meta if value)
             confidence = issue.get("confidence")
             confidence_str = f"{int(round(float(confidence) * 100))}%" if isinstance(confidence, (int, float)) else "-"
 
@@ -814,6 +919,26 @@ class SkillAnalyzer:
                 + (f"<div style='margin-top:4px;color:#475569;'><b>{'Confidence' if en else '置信度'}:</b> {confidence_str}</div>" if confidence is not None else "")
                 + (f"<div style='margin-top:6px;color:#334155;line-height:1.6;'><b>{'Finding' if en else '命中结论'}:</b> {self._esc(str(finding))}</div>" if finding else "")
                 + (f"<div style='margin-top:6px;color:#334155;line-height:1.6;'><b>{'Issue' if en else '问题'}:</b> {self._esc(str(explanation))}</div>" if explanation else "")
+                + (
+                    f"<div style='margin-top:6px;color:#475569;line-height:1.6;background:#eef2ff;border:1px solid #c7d2fe;border-radius:4px;padding:6px;'>"
+                    f"<b>{'LLM Filter Reason' if en else 'LLM过滤理由'}:</b> {self._esc(str(llm_filter_reason))}"
+                    + (f"<div style='margin-top:3px;color:#64748b;font-size:11px;'>{self._esc(llm_meta_text)}</div>" if llm_meta_text else "")
+                    + "</div>"
+                    if llm_filter_reason else ""
+                )
+                + (
+                    f"<div style='margin-top:6px;color:#475569;line-height:1.6;background:#eef2ff;border:1px solid #c7d2fe;border-radius:4px;padding:6px;'>"
+                    f"<b>{'LLM Filter Logic Chain' if en else 'LLM过滤逻辑链'}:</b>"
+                    f"<ol style='margin:4px 0 0 18px;padding:0;'>{logic_chain_html}</ol>"
+                    + "</div>"
+                    if logic_chain_html else ""
+                )
+                + (
+                    f"<div style='margin-top:6px;color:#475569;line-height:1.6;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:4px;padding:6px;'>"
+                    f"<b>{'Filter Reason' if en else '过滤原因'}:</b> {self._esc(str(filter_reason))}"
+                    + "</div>"
+                    if filter_reason and not llm_filter_reason else ""
+                )
                 + (f"<div style='margin-top:6px;color:#334155;line-height:1.6;'><b>{'Recommendation' if en else '修复建议'}:</b> {self._esc(str(remediation))}</div>" if remediation else "")
                 + (f"<div style='margin-top:6px;'><div style='font-weight:600;color:#475569;margin-bottom:3px;'>{'Code Snippet' if en else '代码片段'}</div><div style='font-family:monospace;background:#fff;border:1px solid #e2e8f0;border-radius:4px;padding:6px;white-space:pre-wrap;word-break:break-all;color:#1e293b;'>{self._esc(str(snippet))}</div></div>" if snippet else "")
                 + "</div>"
