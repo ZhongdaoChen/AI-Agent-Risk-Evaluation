@@ -8,6 +8,43 @@ from unittest.mock import AsyncMock, patch
 
 
 class SkillRiskCliTests(unittest.TestCase):
+    def _fake_result(self):
+        return {
+            "score": 75,
+            "risk_level": "MEDIUM",
+            "summary": "SkillSpector scanned 1 component",
+            "findings": [
+                {
+                    "type": "INFO",
+                    "title": "📊 Risk Assessment",
+                    "detail": "<div>Risk block</div>",
+                    "is_html": True,
+                },
+                {
+                    "type": "INFO",
+                    "title": "🧩 Components",
+                    "detail": "<div>Component block</div>",
+                    "is_html": True,
+                },
+            ],
+            "metrics": {
+                "components_scanned": 1,
+                "raw_issues_found": 2,
+                "counted_high_critical_issues": 1,
+                "recommendation": "CAUTION",
+            },
+            "issues": [
+                {
+                    "id": "E2",
+                    "severity": "HIGH",
+                    "category": "Data Exfiltration",
+                    "file": "skills/demo/SKILL.md",
+                    "line": 7,
+                    "finding": "Skill sends secrets to an external endpoint.",
+                }
+            ],
+        }
+
     def test_scan_writes_json_and_markdown_outputs_for_local_repo(self):
         try:
             appsec_skill_security_checker = importlib.import_module("appsec_skill_security_checker")
@@ -23,41 +60,7 @@ class SkillRiskCliTests(unittest.TestCase):
             json_path = root / "result.json"
             md_path = root / "summary.md"
 
-            fake_result = {
-                "score": 75,
-                "risk_level": "MEDIUM",
-                "summary": "SkillSpector scanned 1 component",
-                "findings": [
-                    {
-                        "type": "INFO",
-                        "title": "📊 Risk Assessment",
-                        "detail": "<div>Risk block</div>",
-                        "is_html": True,
-                    },
-                    {
-                        "type": "INFO",
-                        "title": "🧩 Components",
-                        "detail": "<div>Component block</div>",
-                        "is_html": True,
-                    },
-                ],
-                "metrics": {
-                    "components_scanned": 1,
-                    "raw_issues_found": 2,
-                    "counted_high_critical_issues": 1,
-                    "recommendation": "CAUTION",
-                },
-                "issues": [
-                    {
-                        "id": "E2",
-                        "severity": "HIGH",
-                        "category": "Data Exfiltration",
-                        "file": "skills/demo/SKILL.md",
-                        "line": 7,
-                        "finding": "Skill sends secrets to an external endpoint.",
-                    }
-                ],
-            }
+            fake_result = self._fake_result()
 
             with patch.object(appsec_skill_security_checker.SkillAnalyzer, "analyze_local", new=AsyncMock(return_value=fake_result)) as scan:
                 exit_code = appsec_skill_security_checker.main([
@@ -100,6 +103,38 @@ class SkillRiskCliTests(unittest.TestCase):
             self.assertIn("<div>Risk block</div>", html)
             self.assertIn("<h2>🧩 Components</h2>", html)
             self.assertIn("<div>Component block</div>", html)
+
+    def test_scan_writes_default_json_markdown_and_html_outputs(self):
+        try:
+            appsec_skill_security_checker = importlib.import_module("appsec_skill_security_checker")
+        except ModuleNotFoundError:
+            self.fail("appsec_skill_security_checker CLI module is missing")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            old_cwd = Path.cwd()
+
+            with patch.object(appsec_skill_security_checker.SkillAnalyzer, "analyze_local", new=AsyncMock(return_value=self._fake_result())):
+                try:
+                    os.chdir(root)
+                    exit_code = appsec_skill_security_checker.main(["scan", "--repo", str(repo)])
+                finally:
+                    os.chdir(old_cwd)
+
+            json_path = root / "skill-security-report.json"
+            md_path = root / "skill-security-report.md"
+            html_path = root / "skill-security-report.html"
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(json_path.exists())
+            self.assertTrue(md_path.exists())
+            self.assertTrue(html_path.exists())
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["result"]["risk_level"], "MEDIUM")
+            self.assertNotIn("findings", payload["raw_result"])
+            self.assertIn("## Skill Risk Scan", md_path.read_text(encoding="utf-8"))
+            self.assertIn("<h1>Skill Risk Scan Details</h1>", html_path.read_text(encoding="utf-8"))
 
     def test_scan_loads_dotenv_before_running_analyzer(self):
         try:

@@ -247,17 +247,21 @@ Run against a local checkout:
 python3 -m appsec_skill_security_checker scan \
   --repo . \
   --skills skills/example-skill \
-  --output sv-results/appsec-skill-security-checker.json \
-  --summary-output sv-results/appsec-skill-security-checker-summary.md \
   --lang en
 ```
+
+By default, the CLI writes:
+
+- `skill-security-report.json` — machine-readable summary without large HTML detail blocks
+- `skill-security-report.md` — concise Markdown summary
+- `skill-security-report.html` — Web-style detail report, including component diagnostics
 
 Inputs:
 
 - `--repo` — local repository checkout path, usually `.` in GitHub Actions
 - `--skills` — optional skill paths relative to `--repo`; omit to scan the whole checkout
-- `--output` — JSON artifact path; when set, the CLI also writes Web-style detail HTML next to it using the same basename and `.html` extension
-- `--summary-output` — Markdown summary artifact path
+- `--output` — optional JSON artifact path override; when set, the CLI also writes Web-style detail HTML next to it using the same basename and `.html` extension
+- `--summary-output` — optional Markdown summary artifact path override
 - `--fail-on LOW|MEDIUM|HIGH|CRITICAL` — optional hard gate; without this flag, findings are warn-only
 
 The CLI reads allowlisted scanner settings such as `QWEN_API_KEY` from `.env` in the current working directory before scanning, matching the Web app's local development behavior without importing arbitrary process-control variables. Export environment variables explicitly in CI.

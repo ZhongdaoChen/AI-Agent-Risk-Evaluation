@@ -15,6 +15,8 @@ from analyzers.skill_analyzer import SkillAnalyzer
 
 
 DOTENV_ALLOWLIST = {"QWEN_API_KEY"}
+DEFAULT_JSON_OUTPUT = "skill-security-report.json"
+DEFAULT_MARKDOWN_OUTPUT = "skill-security-report.md"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,8 +46,8 @@ def _build_parser() -> argparse.ArgumentParser:
     scan = subparsers.add_parser("scan", help="Scan local skill directories")
     scan.add_argument("--repo", default=".", help="Local repository checkout path")
     scan.add_argument("--skills", nargs="*", default=None, help="Skill paths relative to --repo")
-    scan.add_argument("--output", help="Write machine-readable JSON to this path")
-    scan.add_argument("--summary-output", help="Write Markdown summary to this path")
+    scan.add_argument("--output", help=f"Write machine-readable JSON to this path (default: {DEFAULT_JSON_OUTPUT})")
+    scan.add_argument("--summary-output", help=f"Write Markdown summary to this path (default: {DEFAULT_MARKDOWN_OUTPUT})")
     scan.add_argument("--lang", choices=("en", "zh"), default="en", help="Output language")
     scan.add_argument(
         "--fail-on",
@@ -63,15 +65,12 @@ async def _run_scan(args: argparse.Namespace) -> int:
     exit_code = _exit_code_for_result(result, args.fail_on)
     payload = _build_payload(repo_path, skill_paths, result, exit_code)
 
+    json_path = args.output or DEFAULT_JSON_OUTPUT
+    markdown_path = args.summary_output or DEFAULT_MARKDOWN_OUTPUT
     json_text = json.dumps(payload, ensure_ascii=False, indent=2)
-    if args.output:
-        _write_text(args.output, json_text + "\n")
-        _write_text(str(Path(args.output).with_suffix(".html")), _render_html_details(result))
-    else:
-        print(json_text)
-
-    if args.summary_output:
-        _write_text(args.summary_output, _render_markdown(payload))
+    _write_text(json_path, json_text + "\n")
+    _write_text(str(Path(json_path).with_suffix(".html")), _render_html_details(result))
+    _write_text(markdown_path, _render_markdown(payload))
 
     return exit_code
 
