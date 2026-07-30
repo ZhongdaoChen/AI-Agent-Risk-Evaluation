@@ -73,32 +73,44 @@ class SkillAnalyzer:
                 "下载 GitHub 仓库快照",
             )
             temp_root, repo_dir = await self._download_repo_snapshot()
-            await self._emit_progress(
-                "Running SkillSpector static/AST/YARA scan",
-                "执行 SkillSpector 静态 / AST / YARA 扫描",
-            )
-            report = await self._run_skillspector(repo_dir)
-            await self._emit_progress(
-                "Reviewing SkillSpector findings for false positives and malicious intent",
-                "调用 LLM / 启发式规则判断 SkillSpector 命中是否误报及是否恶意",
-            )
-            filtered_issues = await self._select_malicious_issues(report, repo_dir)
-            if self.lang != "en":
-                await self._emit_progress(
-                    "Localizing retained Skill findings",
-                    "本地化最终保留的 Skill 发现",
-                )
-                filtered_issues = await self._localize_issues_for_display(filtered_issues)
-            await self._emit_progress(
-                "Rendering Skill Security Quality result",
-                "渲染 Skill 安全质量结果",
-            )
-            return self._render_result(report, repo_dir, filtered_issues)
+            return await self.analyze_local(repo_dir)
         except Exception as e:
             return self._error_result(str(e))
         finally:
             if temp_root:
                 shutil.rmtree(temp_root, ignore_errors=True)
+
+    async def analyze_local(self, repo_dir: str, skill_paths: list[str] | None = None) -> dict:
+        try:
+            await self._emit_progress(
+                "Running SkillSpector static/AST/YARA scan",
+                "执行 SkillSpector 静态 / AST / YARA 扫描",
+            )
+            report = await self._run_skillspector(repo_dir, skill_paths)
+            scan_dir = str(report.pop("_scan_dir", repo_dir))
+            scan_temp_root = report.pop("_scan_temp_root", None)
+            try:
+                await self._emit_progress(
+                    "Reviewing SkillSpector findings for false positives and malicious intent",
+                    "调用 LLM / 启发式规则判断 SkillSpector 命中是否误报及是否恶意",
+                )
+                filtered_issues = await self._select_malicious_issues(report, scan_dir)
+                if self.lang != "en":
+                    await self._emit_progress(
+                        "Localizing retained Skill findings",
+                        "本地化最终保留的 Skill 发现",
+                    )
+                    filtered_issues = await self._localize_issues_for_display(filtered_issues)
+                await self._emit_progress(
+                    "Rendering Skill Security Quality result",
+                    "渲染 Skill 安全质量结果",
+                )
+                return self._render_result(report, scan_dir, filtered_issues)
+            finally:
+                if scan_temp_root:
+                    shutil.rmtree(scan_temp_root, ignore_errors=True)
+        except Exception as e:
+            return self._error_result(str(e))
 
     async def _download_repo_snapshot(self) -> tuple[str, str]:
         async with httpx.AsyncClient(headers=self.headers, timeout=60, follow_redirects=True) as gh:
@@ -134,17 +146,21 @@ class SkillAnalyzer:
         repo_dir = extracted_dirs[0] if extracted_dirs else Path(temp_root)
         return temp_root, str(repo_dir)
 
-    async def _run_skillspector(self, repo_dir: str) -> dict[str, Any]:
+    async def _run_skillspector(self, repo_dir: str, skill_paths: list[str] | None = None) -> dict[str, Any]:
         report_dir = tempfile.mkdtemp(prefix="skillspector-report-")
         report_path = Path(report_dir) / "report.json"
+        scan_temp_root = None
+        scan_dir = repo_dir
         try:
+            if skill_paths:
+                scan_temp_root, scan_dir = self._prepare_skill_scan_root(repo_dir, skill_paths)
             env = os.environ.copy()
             cmd = [
                 sys.executable,
                 "-m",
                 "skillspector.cli",
                 "scan",
-                repo_dir,
+                scan_dir,
                 "--format",
                 "json",
                 "--output",
@@ -185,7 +201,10 @@ class SkillAnalyzer:
                     "Parsing SkillSpector JSON report",
                     "解析 SkillSpector JSON 报告",
                 )
-                return json.loads(report_path.read_text(encoding="utf-8"))
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                report["_scan_dir"] = scan_dir
+                report["_scan_temp_root"] = scan_temp_root
+                return report
 
             stderr_text = stderr.decode("utf-8", errors="ignore").strip()
             stdout_text = stdout.decode("utf-8", errors="ignore").strip()
@@ -196,8 +215,58 @@ class SkillAnalyzer:
                     f"SkillSpector scan failed (exit {proc.returncode}): {stderr_text or stdout_text}"
                 )
             raise RuntimeError("SkillSpector did not produce a JSON report")
+        except Exception:
+            if scan_temp_root:
+                shutil.rmtree(scan_temp_root, ignore_errors=True)
+            raise
         finally:
             shutil.rmtree(report_dir, ignore_errors=True)
+
+    def _prepare_skill_scan_root(self, repo_dir: str, skill_paths: list[str]) -> tuple[str, str]:
+        repo_path = Path(repo_dir).resolve()
+        temp_root = tempfile.mkdtemp(prefix="skillscan-local-")
+        scan_root = Path(temp_root) / "repo"
+        try:
+            for raw_path in skill_paths:
+                rel_path = self._normalize_cli_skill_path(raw_path)
+                source = (repo_path / rel_path).resolve()
+                try:
+                    source.relative_to(repo_path)
+                except ValueError as exc:
+                    raise ValueError(f"Skill path escapes repository: {raw_path}") from exc
+                if not source.exists():
+                    raise FileNotFoundError(f"Skill path does not exist: {raw_path}")
+                self._reject_symlink_escapes(source, repo_path)
+                destination = scan_root / rel_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if source.is_dir():
+                    shutil.copytree(source, destination, dirs_exist_ok=True, symlinks=True)
+                else:
+                    shutil.copy2(source, destination, follow_symlinks=False)
+            return temp_root, str(scan_root)
+        except Exception:
+            shutil.rmtree(temp_root, ignore_errors=True)
+            raise
+
+    def _reject_symlink_escapes(self, source: Path, repo_path: Path) -> None:
+        paths = source.rglob("*") if source.is_dir() else [source]
+        for path in paths:
+            if not path.is_symlink():
+                continue
+            target = path.resolve()
+            try:
+                target.relative_to(repo_path)
+            except ValueError as exc:
+                raise ValueError(f"Skill path contains symlink escaping repository: {path}") from exc
+
+    def _normalize_cli_skill_path(self, path: str) -> str:
+        normalized = str(path).replace("\\", "/").strip().strip("/")
+        if normalized in {"", "."}:
+            raise ValueError("Skill path cannot be empty")
+        parts = [part for part in normalized.split("/") if part and part not in (".",)]
+        if any(part == ".." for part in parts):
+            raise ValueError(f"Skill path escapes repository: {path}")
+        return "/".join(parts)
 
     async def _select_malicious_issues(self, report: dict[str, Any], repo_dir: str) -> list[dict[str, Any]]:
         raw_issues = report.get("issues", []) or []
@@ -541,6 +610,7 @@ class SkillAnalyzer:
             "risk_level": risk_level,
             "summary": summary,
             "findings": findings,
+            "issues": self._public_issues(issues),
             "metrics": {
                 "components_scanned": len(components),
                 "issues_found": len(issues),
@@ -557,6 +627,23 @@ class SkillAnalyzer:
                 "skillspector_version": meta.get("skillspector_version", ""),
             },
         }
+
+    def _public_issues(self, issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        public = []
+        for issue in issues:
+            location = issue.get("location") or {}
+            public.append({
+                "id": str(issue.get("id") or issue.get("rule_id") or ""),
+                "severity": str(issue.get("severity", "")).upper(),
+                "category": issue.get("category") or self._issue_dimension(issue, True),
+                "file": str(location.get("file", "")),
+                "line": location.get("start_line"),
+                "finding": issue.get("finding") or "",
+                "explanation": issue.get("explanation") or issue.get("message") or "",
+                "remediation": issue.get("remediation") or "",
+                "intent": issue.get("intent") or "",
+            })
+        return public
 
     def _render_risk_assessment(
         self,

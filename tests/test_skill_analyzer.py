@@ -1,5 +1,7 @@
 import unittest
 import inspect
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 from analyzers.skill_analyzer import SkillAnalyzer
@@ -746,6 +748,52 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
 
 
 class SkillAnalyzerProgressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_analyze_local_scans_existing_directory_without_downloading(self):
+        details = []
+
+        async def progress_callback(detail):
+            details.append(detail)
+
+        analyzer = SkillAnalyzer("owner", "repo", lang="en", progress_callback=progress_callback)
+        self.assertTrue(hasattr(analyzer, "analyze_local"), "SkillAnalyzer must support local checkout scans")
+        analyzer._download_repo_snapshot = AsyncMock()
+        analyzer._run_skillspector = AsyncMock(return_value={"issues": [], "components": [], "risk_assessment": {}, "metadata": {}})
+        analyzer._select_malicious_issues = AsyncMock(return_value=[])
+        analyzer._render_result = lambda report, repo_dir, issues: {
+            "score": 100,
+            "risk_level": "LOW",
+            "summary": f"scanned {repo_dir}",
+            "findings": [],
+            "metrics": {},
+        }
+
+        result = await analyzer.analyze_local("/tmp/repo")
+
+        self.assertEqual(result["summary"], "scanned /tmp/repo")
+        analyzer._download_repo_snapshot.assert_not_called()
+        analyzer._run_skillspector.assert_awaited_once_with("/tmp/repo", None)
+        joined = " ".join(details)
+        self.assertIn("Running SkillSpector", joined)
+        self.assertIn("Reviewing SkillSpector findings", joined)
+        self.assertIn("Rendering Skill Security Quality result", joined)
+
+    async def test_prepare_skill_scan_root_rejects_nested_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            skill = repo / "skills" / "demo"
+            outside = root / "outside-secret.txt"
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text("# Demo\n", encoding="utf-8")
+            outside.write_text("secret", encoding="utf-8")
+            (skill / "linked-secret.txt").symlink_to(outside)
+
+            analyzer = SkillAnalyzer("owner", "repo")
+            self.assertTrue(hasattr(analyzer, "_prepare_skill_scan_root"), "SkillAnalyzer must isolate selected skill paths")
+
+            with self.assertRaisesRegex(ValueError, "Skill path contains symlink escaping repository"):
+                analyzer._prepare_skill_scan_root(str(repo), ["skills/demo"])
+
     async def test_analyze_emits_skill_progress_details(self):
         details = []
 

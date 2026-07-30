@@ -237,6 +237,67 @@ That is because the controls prompt is currently grounded in:
 
 `Capability Boundary Controls` are generated only for LLM-controllable capabilities: the LLM can trigger the capability and its output dynamically controls execution parameters or targets. Deterministic capabilities, or capabilities whose parameters are fixed, hard-coded, or constrained to a safe allowlist/enum that the LLM cannot expand, are excluded from that category.
 
+## AppSec Skill Security Checker CLI
+
+The Skill Security Quality module is also available as a local checkout CLI for GitHub Actions PR gates. The Web app behavior is unchanged: `/api/analyze` still accepts a GitHub repository URL, downloads a temporary snapshot, and streams the same module result shape to the UI.
+
+Run against a local checkout:
+
+```bash
+python3 -m appsec_skill_security_checker scan \
+  --repo . \
+  --skills skills/example-skill \
+  --output sv-results/appsec-skill-security-checker.json \
+  --summary-output sv-results/appsec-skill-security-checker-summary.md \
+  --lang en
+```
+
+Inputs:
+
+- `--repo` — local repository checkout path, usually `.` in GitHub Actions
+- `--skills` — optional skill paths relative to `--repo`; omit to scan the whole checkout
+- `--output` — JSON artifact path
+- `--summary-output` — Markdown summary artifact path
+- `--fail-on LOW|MEDIUM|HIGH|CRITICAL` — optional hard gate; without this flag, findings are warn-only
+
+Exit codes:
+
+- `0` — scan completed; warn-only findings may still be present
+- `1` — scan completed and met or exceeded `--fail-on`
+- `2` — CLI argument error
+- `3` — scanner returned `UNKNOWN`, usually because SkillSpector or another dependency failed
+
+GitHub Actions example:
+
+```yaml
+- name: Run Skill Risk scan
+  if: always()
+  env:
+    SKILL_DIRS_RAW: ${{ steps.detect.outputs.skill_dirs }}
+  run: |
+    mkdir -p sv-results
+    SKILL_ARGS=()
+    if [ "${{ github.event_name }}" = "pull_request" ] && [ -n "$SKILL_DIRS_RAW" ]; then
+      while IFS= read -r dir; do
+        [ -n "$dir" ] && SKILL_ARGS+=("$dir")
+      done <<< "$SKILL_DIRS_RAW"
+    fi
+    if [ ${#SKILL_ARGS[@]} -eq 0 ]; then
+      SKILL_ARGS=("./skills")
+    fi
+
+    set +e
+    python3 -m appsec_skill_security_checker scan \
+      --repo . \
+      --skills "${SKILL_ARGS[@]}" \
+      --output sv-results/appsec-skill-security-checker.json \
+      --summary-output sv-results/appsec-skill-security-checker-summary.md \
+      --lang en
+    EXIT_CODE=$?
+    set -e
+    echo "$EXIT_CODE" > sv-results/exit-code.txt
+```
+
 ## API
 
 ### `GET /api/health`
