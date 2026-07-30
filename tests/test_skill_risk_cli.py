@@ -1,5 +1,6 @@
 import json
 import importlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,7 +27,20 @@ class SkillRiskCliTests(unittest.TestCase):
                 "score": 75,
                 "risk_level": "MEDIUM",
                 "summary": "SkillSpector scanned 1 component",
-                "findings": [],
+                "findings": [
+                    {
+                        "type": "INFO",
+                        "title": "📊 Risk Assessment",
+                        "detail": "<div>Risk block</div>",
+                        "is_html": True,
+                    },
+                    {
+                        "type": "INFO",
+                        "title": "🧩 Components",
+                        "detail": "<div>Component block</div>",
+                        "is_html": True,
+                    },
+                ],
                 "metrics": {
                     "components_scanned": 1,
                     "raw_issues_found": 2,
@@ -64,6 +78,7 @@ class SkillRiskCliTests(unittest.TestCase):
             resolved_repo = str(repo.resolve())
             scan.assert_awaited_once_with(resolved_repo, ["skills/demo"])
             payload = json.loads(json_path.read_text(encoding="utf-8"))
+            html_path = json_path.with_suffix(".html")
             self.assertEqual(payload["schema_version"], "1.0")
             self.assertEqual(payload["tool"], "appsec-skill-security-checker")
             self.assertEqual(payload["scan"]["mode"], "local")
@@ -72,11 +87,59 @@ class SkillRiskCliTests(unittest.TestCase):
             self.assertEqual(payload["result"]["risk_level"], "MEDIUM")
             self.assertEqual(payload["issues"][0]["file"], "skills/demo/SKILL.md")
             self.assertEqual(payload["exit_code"], 0)
+            self.assertNotIn("findings", payload["raw_result"])
 
             markdown = md_path.read_text(encoding="utf-8")
             self.assertIn("## Skill Risk Scan", markdown)
             self.assertIn("Risk: MEDIUM", markdown)
             self.assertIn("| HIGH | E2 | skills/demo/SKILL.md:7 |", markdown)
+
+            html = html_path.read_text(encoding="utf-8")
+            self.assertIn("<h1>Skill Risk Scan Details</h1>", html)
+            self.assertIn("<h2>📊 Risk Assessment</h2>", html)
+            self.assertIn("<div>Risk block</div>", html)
+            self.assertIn("<h2>🧩 Components</h2>", html)
+            self.assertIn("<div>Component block</div>", html)
+
+    def test_scan_loads_dotenv_before_running_analyzer(self):
+        try:
+            appsec_skill_security_checker = importlib.import_module("appsec_skill_security_checker")
+        except ModuleNotFoundError:
+            self.fail("appsec_skill_security_checker CLI module is missing")
+
+        fake_result = {
+            "score": 100,
+            "risk_level": "LOW",
+            "summary": "ok",
+            "findings": [],
+            "metrics": {},
+            "issues": [],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (root / ".env").write_text(
+                "QWEN_API_KEY=cli-dotenv-key\nPYTHONPATH=/tmp/poisoned\n",
+                encoding="utf-8",
+            )
+            old_cwd = Path.cwd()
+
+            async def analyze_local(repo_path, skill_paths):
+                self.assertEqual(os.getenv("QWEN_API_KEY"), "cli-dotenv-key")
+                self.assertIsNone(os.getenv("PYTHONPATH"))
+                return fake_result
+
+            with patch.dict(os.environ, {}, clear=True):
+                with patch.object(appsec_skill_security_checker.SkillAnalyzer, "analyze_local", new=AsyncMock(side_effect=analyze_local)):
+                    try:
+                        os.chdir(root)
+                        exit_code = appsec_skill_security_checker.main(["scan", "--repo", str(repo)])
+                    finally:
+                        os.chdir(old_cwd)
+
+        self.assertEqual(exit_code, 0)
 
 
 if __name__ == "__main__":

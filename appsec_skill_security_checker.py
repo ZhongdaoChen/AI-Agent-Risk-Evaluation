@@ -2,21 +2,37 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import html
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
+from dotenv import dotenv_values
+
 from analyzers.skill_analyzer import SkillAnalyzer
 
 
+DOTENV_ALLOWLIST = {"QWEN_API_KEY"}
+
+
 def main(argv: list[str] | None = None) -> int:
+    _load_allowed_dotenv(Path.cwd() / ".env")
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "scan":
         return asyncio.run(_run_scan(args))
     parser.print_help()
     return 2
+
+
+def _load_allowed_dotenv(path: Path) -> None:
+    if not path.is_file():
+        return
+    for key, value in dotenv_values(path).items():
+        if key in DOTENV_ALLOWLIST and value is not None:
+            os.environ.setdefault(key, value)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -50,6 +66,7 @@ async def _run_scan(args: argparse.Namespace) -> int:
     json_text = json.dumps(payload, ensure_ascii=False, indent=2)
     if args.output:
         _write_text(args.output, json_text + "\n")
+        _write_text(str(Path(args.output).with_suffix(".html")), _render_html_details(result))
     else:
         print(json_text)
 
@@ -78,6 +95,11 @@ def _risk_rank(risk_level: str) -> int:
 
 
 def _build_payload(repo_path: str, skill_paths: list[str], result: dict[str, Any], exit_code: int) -> dict[str, Any]:
+    raw_result = {
+        key: value
+        for key, value in result.items()
+        if key != "findings"
+    }
     return {
         "schema_version": "1.0",
         "tool": "appsec-skill-security-checker",
@@ -93,9 +115,38 @@ def _build_payload(repo_path: str, skill_paths: list[str], result: dict[str, Any
             "metrics": result.get("metrics", {}),
         },
         "issues": result.get("issues", []),
-        "raw_result": result,
+        "raw_result": raw_result,
         "exit_code": exit_code,
     }
+
+
+def _render_html_details(result: dict[str, Any]) -> str:
+    blocks = []
+    for finding in result.get("findings", []) or []:
+        if not isinstance(finding, dict):
+            continue
+        title = html.escape(str(finding.get("title") or "Details"))
+        detail = str(finding.get("detail") or "")
+        if not finding.get("is_html"):
+            detail = f"<pre>{html.escape(detail)}</pre>"
+        blocks.append(f"<section><h2>{title}</h2>\n{detail}\n</section>")
+
+    body = "\n".join(blocks) if blocks else "<p>No HTML details were produced.</p>"
+    return "\n".join([
+        "<!doctype html>",
+        "<html lang=\"en\">",
+        "<head>",
+        "  <meta charset=\"utf-8\">",
+        "  <title>Skill Risk Scan Details</title>",
+        "  <style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:24px;color:#0f172a;}section{margin-bottom:24px;}h1{font-size:24px;}h2{font-size:18px;margin-top:24px;}</style>",
+        "</head>",
+        "<body>",
+        "<h1>Skill Risk Scan Details</h1>",
+        body,
+        "</body>",
+        "</html>",
+        "",
+    ])
 
 
 def _render_markdown(payload: dict[str, Any]) -> str:

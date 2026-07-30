@@ -256,9 +256,11 @@ Inputs:
 
 - `--repo` — local repository checkout path, usually `.` in GitHub Actions
 - `--skills` — optional skill paths relative to `--repo`; omit to scan the whole checkout
-- `--output` — JSON artifact path
+- `--output` — JSON artifact path; when set, the CLI also writes Web-style detail HTML next to it using the same basename and `.html` extension
 - `--summary-output` — Markdown summary artifact path
 - `--fail-on LOW|MEDIUM|HIGH|CRITICAL` — optional hard gate; without this flag, findings are warn-only
+
+The CLI reads allowlisted scanner settings such as `QWEN_API_KEY` from `.env` in the current working directory before scanning, matching the Web app's local development behavior without importing arbitrary process-control variables. Export environment variables explicitly in CI.
 
 Exit codes:
 
