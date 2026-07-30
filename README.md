@@ -250,11 +250,11 @@ python3 -m appsec_skill_security_checker scan \
   --lang en
 ```
 
-By default, the CLI writes:
+By default, the CLI prefixes report files with the final path segment of `--repo`. For `--repo /path/to/my-skills`, it writes:
 
-- `skill-security-report.json` — machine-readable summary without large HTML detail blocks
-- `skill-security-report.md` — concise Markdown summary
-- `skill-security-report.html` — Web-style detail report, including component diagnostics
+- `my-skills-skill-security-report.json` — machine-readable summary without large HTML detail blocks
+- `my-skills-skill-security-report.md` — concise Markdown summary
+- `my-skills-skill-security-report.html` — Web-style detail report, including component diagnostics
 
 Inputs:
 
@@ -262,14 +262,13 @@ Inputs:
 - `--skills` — optional skill paths relative to `--repo`; omit to scan the whole checkout
 - `--output` — optional JSON artifact path override; when set, the CLI also writes Web-style detail HTML next to it using the same basename and `.html` extension
 - `--summary-output` — optional Markdown summary artifact path override
-- `--fail-on LOW|MEDIUM|HIGH|CRITICAL` — optional hard gate; without this flag, findings are warn-only
 
 The CLI reads allowlisted scanner settings such as `QWEN_API_KEY` from `.env` in the current working directory before scanning, matching the Web app's local development behavior without importing arbitrary process-control variables. Export environment variables explicitly in CI.
 
 Exit codes:
 
-- `0` — scan completed; warn-only findings may still be present
-- `1` — scan completed and met or exceeded `--fail-on`
+- `0` — scan completed with `LOW` or `MEDIUM` risk
+- `1` — scan completed with `HIGH` or `CRITICAL` risk
 - `2` — CLI argument error
 - `3` — scanner returned `UNKNOWN`, usually because SkillSpector or another dependency failed
 

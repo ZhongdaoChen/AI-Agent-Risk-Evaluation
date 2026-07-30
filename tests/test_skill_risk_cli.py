@@ -45,6 +45,11 @@ class SkillRiskCliTests(unittest.TestCase):
             ],
         }
 
+    def _fake_result_with_risk(self, risk_level):
+        result = self._fake_result()
+        result["risk_level"] = risk_level
+        return result
+
     def test_scan_writes_json_and_markdown_outputs_for_local_repo(self):
         try:
             appsec_skill_security_checker = importlib.import_module("appsec_skill_security_checker")
@@ -123,9 +128,9 @@ class SkillRiskCliTests(unittest.TestCase):
                 finally:
                     os.chdir(old_cwd)
 
-            json_path = root / "skill-security-report.json"
-            md_path = root / "skill-security-report.md"
-            html_path = root / "skill-security-report.html"
+            json_path = root / "repo-skill-security-report.json"
+            md_path = root / "repo-skill-security-report.md"
+            html_path = root / "repo-skill-security-report.html"
             self.assertEqual(exit_code, 0)
             self.assertTrue(json_path.exists())
             self.assertTrue(md_path.exists())
@@ -175,6 +180,48 @@ class SkillRiskCliTests(unittest.TestCase):
                         os.chdir(old_cwd)
 
         self.assertEqual(exit_code, 0)
+
+    def test_scan_exits_one_for_high_or_critical_risk_by_default(self):
+        try:
+            appsec_skill_security_checker = importlib.import_module("appsec_skill_security_checker")
+        except ModuleNotFoundError:
+            self.fail("appsec_skill_security_checker CLI module is missing")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+
+            for risk_level in ("HIGH", "CRITICAL"):
+                with self.subTest(risk_level=risk_level):
+                    with patch.object(
+                        appsec_skill_security_checker.SkillAnalyzer,
+                        "analyze_local",
+                        new=AsyncMock(return_value=self._fake_result_with_risk(risk_level)),
+                    ):
+                        exit_code = appsec_skill_security_checker.main([
+                            "scan",
+                            "--repo",
+                            str(repo),
+                            "--output",
+                            str(root / f"{risk_level.lower()}.json"),
+                            "--summary-output",
+                            str(root / f"{risk_level.lower()}.md"),
+                        ])
+
+                    self.assertEqual(exit_code, 1)
+
+    def test_scan_no_longer_accepts_fail_on_option(self):
+        try:
+            appsec_skill_security_checker = importlib.import_module("appsec_skill_security_checker")
+        except ModuleNotFoundError:
+            self.fail("appsec_skill_security_checker CLI module is missing")
+
+        parser = appsec_skill_security_checker._build_parser()
+        with self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["scan", "--fail-on", "HIGH"])
+
+        self.assertEqual(raised.exception.code, 2)
 
 
 if __name__ == "__main__":

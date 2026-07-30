@@ -15,8 +15,7 @@ from analyzers.skill_analyzer import SkillAnalyzer
 
 
 DOTENV_ALLOWLIST = {"QWEN_API_KEY"}
-DEFAULT_JSON_OUTPUT = "skill-security-report.json"
-DEFAULT_MARKDOWN_OUTPUT = "skill-security-report.md"
+REPORT_SUFFIX = "skill-security-report"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,14 +45,9 @@ def _build_parser() -> argparse.ArgumentParser:
     scan = subparsers.add_parser("scan", help="Scan local skill directories")
     scan.add_argument("--repo", default=".", help="Local repository checkout path")
     scan.add_argument("--skills", nargs="*", default=None, help="Skill paths relative to --repo")
-    scan.add_argument("--output", help=f"Write machine-readable JSON to this path (default: {DEFAULT_JSON_OUTPUT})")
-    scan.add_argument("--summary-output", help=f"Write Markdown summary to this path (default: {DEFAULT_MARKDOWN_OUTPUT})")
+    scan.add_argument("--output", help="Write machine-readable JSON to this path")
+    scan.add_argument("--summary-output", help="Write Markdown summary to this path")
     scan.add_argument("--lang", choices=("en", "zh"), default="en", help="Output language")
-    scan.add_argument(
-        "--fail-on",
-        choices=("LOW", "MEDIUM", "HIGH", "CRITICAL"),
-        help="Return exit 1 when risk is at or above this level",
-    )
     return parser
 
 
@@ -62,11 +56,11 @@ async def _run_scan(args: argparse.Namespace) -> int:
     skill_paths = [path for path in (args.skills or []) if path]
     analyzer = SkillAnalyzer("local", Path(repo_path).name, lang=args.lang)
     result = await analyzer.analyze_local(repo_path, skill_paths or None)
-    exit_code = _exit_code_for_result(result, args.fail_on)
+    exit_code = _exit_code_for_result(result)
     payload = _build_payload(repo_path, skill_paths, result, exit_code)
 
-    json_path = args.output or DEFAULT_JSON_OUTPUT
-    markdown_path = args.summary_output or DEFAULT_MARKDOWN_OUTPUT
+    json_path = args.output or _default_report_path(repo_path, "json")
+    markdown_path = args.summary_output or _default_report_path(repo_path, "md")
     json_text = json.dumps(payload, ensure_ascii=False, indent=2)
     _write_text(json_path, json_text + "\n")
     _write_text(str(Path(json_path).with_suffix(".html")), _render_html_details(result))
@@ -75,22 +69,18 @@ async def _run_scan(args: argparse.Namespace) -> int:
     return exit_code
 
 
-def _exit_code_for_result(result: dict[str, Any], fail_on: str | None) -> int:
+def _default_report_path(repo_path: str, extension: str) -> str:
+    repo_name = Path(repo_path).name or "repo"
+    return f"{repo_name}-{REPORT_SUFFIX}.{extension}"
+
+
+def _exit_code_for_result(result: dict[str, Any]) -> int:
     risk_level = str(result.get("risk_level", "UNKNOWN")).upper()
     if risk_level == "UNKNOWN":
         return 3
-    if fail_on and _risk_rank(risk_level) >= _risk_rank(fail_on):
+    if risk_level in {"HIGH", "CRITICAL"}:
         return 1
     return 0
-
-
-def _risk_rank(risk_level: str) -> int:
-    return {
-        "LOW": 1,
-        "MEDIUM": 2,
-        "HIGH": 3,
-        "CRITICAL": 4,
-    }.get(str(risk_level).upper(), 0)
 
 
 def _build_payload(repo_path: str, skill_paths: list[str], result: dict[str, Any], exit_code: int) -> dict[str, Any]:
