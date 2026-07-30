@@ -247,8 +247,11 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
         self.assertEqual(self.analyzer._build_llm_keep_map(decisions), {})
 
     def test_relevant_skillspector_rule_allowlist(self):
-        allowed = ["AST1", "E1", "E4", "EA1", "P1", "P8", "TP1", "PE3", "YR1", "SSD1"]
-        blocked = ["SC2", "RA1", "TT3", "OH1", "MP1", "TM1", "TR1", "LP1", "MCP1", "ASI02", "PE1", "PE2"]
+        allowed = [
+            "AST1", "E1", "E4", "EA1", "P1", "P8", "TP1", "YR1", "SSD1",
+            "SDI-1", "SDI-4", "LP1", "LP4", "PE1", "PE2", "PE3",
+        ]
+        blocked = ["SC2", "RA1", "TT3", "OH1", "MP1", "TM1", "TR1", "MCP1", "ASI02"]
 
         for rule_id in allowed:
             self.assertTrue(self.analyzer._is_relevant_skillspector_rule({"id": rule_id}), rule_id)
@@ -271,6 +274,18 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
         }
 
         self.assertEqual(self.analyzer._enforce_malicious_intent_policy([issue]), [issue])
+
+    def test_sdi_findings_are_not_treated_as_generic_security_quality_issues(self):
+        issue = {
+            "id": "SDI-1",
+            "severity": "HIGH",
+            "category": "Semantic Developer Intent",
+            "finding": "The skill description does not match its code behavior.",
+            "explanation": "The manifest describes local summarization while the code accesses network services.",
+            "code_snippet": "requests.post('https://api.example.com/summarize', json=payload)",
+        }
+
+        self.assertFalse(self.analyzer._is_generic_security_quality_issue(issue))
 
     def test_final_policy_does_not_filter_llm_kept_readme_credential_reference(self):
         issue = {
@@ -708,6 +723,26 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
         self.assertIn("严重度为 LOW", html)
         self.assertIn("规则 SC1 不在当前恶意意图复核 allowlist 中", html)
         self.assertNotIn("LLM过滤理由", html)
+
+    def test_reviewed_candidate_missing_llm_decision_gets_specific_diagnostic_not_generic_fallback(self):
+        issue = {
+            "id": "E2",
+            "severity": "HIGH",
+            "category": "Data Exfiltration",
+            "location": {"file": "skills/billing/SKILL.md", "start_line": 33},
+            "finding": "Code accesses environment variables that may contain secrets.",
+            "explanation": "SkillSpector reported possible credential access.",
+            "code_snippet": "api_key = os.getenv('OPENAI_API_KEY')",
+        }
+
+        annotated = self.analyzer._with_filter_reason(issue, en=False)
+        html = self.analyzer._render_filtered_component_issues([annotated], en=False)
+
+        self.assertNotIn("已过滤：复核后未被选为恶意高危/严重发现", annotated["filter_reason"])
+        self.assertNotIn("已过滤：复核后未被选为恶意高危/严重发现", html)
+        self.assertIn("LLM 未返回该候选项的过滤逻辑链", annotated["filter_reason"])
+        self.assertIn("规则 E2", annotated["filter_reason"])
+        self.assertIn("OPENAI_API_KEY", annotated["filter_reason"])
 
 
 class SkillAnalyzerProgressTests(unittest.IsolatedAsyncioTestCase):

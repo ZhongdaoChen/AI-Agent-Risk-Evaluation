@@ -23,7 +23,7 @@ The web UI supports **module-level selection**, so users can choose which analys
    Identifies what the LLM can actually trigger, estimates blast radius only for capabilities whose parameters or targets are dynamically controlled by LLM output, and separates fixed/constrained or deterministic capabilities from scored blast radius.
 
 2. **Skill Security Quality**  
-   Uses **SkillSpector** to scan skills/tools, then post-filters the results to keep only **subjectively malicious High/Critical findings**. Routine coding sloppiness, generic CVEs, SDI/SAST-style injection warnings, and non-malicious validation gaps are excluded from scoring.
+   Uses **SkillSpector** to scan skills/tools, then post-filters the results to keep only **subjectively malicious High/Critical findings**. Routine coding sloppiness, generic CVEs, generic SAST-style injection warnings, and non-malicious validation gaps are excluded from scoring.
 
 3. **Agent Guardrails**  
    Evaluates whether the repository contains controls that constrain the **LLM decision loop**, such as human approval, step limits, tool gating, and prompt-injection defenses.
@@ -76,7 +76,7 @@ Ordinary validation or software hygiene that is not tied to the LLM control loop
 The Skill module is intentionally opinionated:
 
 - SkillSpector provides broad discovery across static rules, AST, YARA, and semantic analyzers.
-- A rule allowlist reduces noise before LLM review. Only `AST*`, `E*`, `EA*`, `P*`, `TP*`, `YR*`, `SSD*`, and `PE3` findings are considered for this module.
+- A rule allowlist reduces noise before LLM review. Only `AST*`, `E*`, `EA*`, `LP*`, `P*`, `PE*`, `SDI*`, `TP*`, `YR*`, and `SSD*` findings are considered for this module.
 - qwen-plus performs semantic malicious-intent review with `temperature=0.0`; it first reviews each SkillSpector candidate to decide whether the scanner conclusion is a real risk or a false positive, and false positives are ignored before scoring.
 - For real risks, qwen-plus then assesses malicious intent, whether scanner severity is overestimated, and the final risk level.
 - A finding is retained only when `malicious_intent = true` and `final_risk = HIGH or CRITICAL`.

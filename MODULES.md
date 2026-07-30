@@ -471,7 +471,7 @@ requests: https://osv.dev/vulnerability/PYSEC-2023-XXX，requirements.txt
 
 > 权重设计逻辑：Agent能力/爆炸半径分析和 Agent安全护栏权重最高，因为这是 AI Agent 区别于普通开源库的核心风险维度。
 >
-> Skill 安全质量只将带有明确恶意意图的 High / Critical 发现计入分数，例如窃取 secrets、外传数据、隐藏载荷、后门或持久化行为。普通 SDI/SAST 注入告警、输入校验缺失、泛化危险 API 或非恶意代码质量问题会被过滤，不参与该模块评分。
+> Skill 安全质量只将带有明确恶意意图的 High / Critical 发现计入分数，例如窃取 secrets、外传数据、隐藏载荷、后门或持久化行为。普通 SAST 注入告警、输入校验缺失、泛化危险 API 或非恶意代码质量问题会被过滤，不参与该模块评分。
 
 ### 非公开仓库评分规则
 

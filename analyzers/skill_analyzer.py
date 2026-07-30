@@ -277,9 +277,8 @@ class SkillAnalyzer:
     def _is_relevant_skillspector_rule(self, issue: dict[str, Any]) -> bool:
         rule_id = str(issue.get("id") or issue.get("rule_id") or "").upper()
         return (
-            rule_id.startswith(("AST", "E", "EA", "TP", "YR", "SSD"))
+            rule_id.startswith(("AST", "E", "EA", "LP", "PE", "SDI", "TP", "YR", "SSD"))
             or re.fullmatch(r"P\d+", rule_id) is not None
-            or rule_id == "PE3"
         )
 
     def _build_intent_review_prompt(self, prompt_items: list[dict[str, Any]]) -> tuple[str, str]:
@@ -760,6 +759,12 @@ class SkillAnalyzer:
         annotated = dict(issue)
         severity = str(issue.get("severity", "LOW")).upper()
         rule_id = str(issue.get("id") or issue.get("rule_id") or "").upper()
+        location = issue.get("location") or {}
+        file_path = str(location.get("file") or "")
+        line = str(location.get("start_line") or "")
+        finding = str(issue.get("finding") or issue.get("explanation") or issue.get("message") or "").strip()
+        snippet = str(issue.get("code_snippet") or "").strip().replace("\n", " ")
+        snippet = snippet[:160] + ("..." if len(snippet) > 160 else "")
         if severity not in {"HIGH", "CRITICAL"}:
             reason = (
                 f"Not sent to LLM: severity is {severity}, so it is not a High/Critical malicious-intent candidate."
@@ -773,10 +778,16 @@ class SkillAnalyzer:
                 f"未送 LLM：规则 {rule_id or 'UNKNOWN'} 不在当前恶意意图复核 allowlist 中。"
             )
         else:
+            where = f"{file_path}:{line}" if file_path and line else file_path or "未知文件"
             reason = (
-                "Filtered out: it was not selected as a malicious High/Critical finding after review."
+                f"LLM did not return a filter_logic_chain for this reviewed candidate. "
+                f"Rule {rule_id or 'UNKNOWN'} at {where} was filtered without a structured LLM rationale; "
+                f"SkillSpector finding: {finding or 'N/A'}; evidence snippet: {snippet or 'N/A'}. "
+                "Re-run the scan to request the required evidence chain, or inspect this candidate manually."
                 if en else
-                "已过滤：复核后未被选为恶意高危/严重发现。"
+                f"LLM 未返回该候选项的过滤逻辑链。规则 {rule_id or 'UNKNOWN'} 位于 {where}，"
+                f"该候选项已被过滤但缺少结构化 LLM 诊断；SkillSpector 命中：{finding or '无'}；"
+                f"证据片段：{snippet or '无'}。请重新扫描以请求完整证据链，或人工复核该候选项。"
             )
         annotated["filter_reason"] = reason
         annotated["filter_reason_source"] = "local"
@@ -1209,7 +1220,7 @@ class SkillAnalyzer:
         category = str(issue.get("category") or "").lower()
         text = self._issue_text(issue)
 
-        generic_rule = rule_id.startswith(("SDI", "CWE", "BANDIT", "PYSEC", "JS"))
+        generic_rule = rule_id.startswith(("CWE", "BANDIT", "PYSEC", "JS"))
         generic_category = any(word in category for word in ("taint", "injection", "validation", "semantic security"))
         generic_terms = (
             "shell injection", "command injection", "path injection", "code injection",
