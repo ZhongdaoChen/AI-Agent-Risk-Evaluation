@@ -26,6 +26,8 @@ from typing import Any
 import httpx
 from openai import AsyncOpenAI
 
+from analyzers.secret_detector import redact_secrets_in_text, scan_directory_for_secrets
+
 
 class SkillAnalyzer:
     GITHUB_BASE = "https://api.github.com"
@@ -87,6 +89,7 @@ class SkillAnalyzer:
                 "执行 SkillSpector 静态 / AST / YARA 扫描",
             )
             report = await self._run_skillspector(repo_dir, skill_paths)
+            report = self._redact_report_secrets(report)
             scan_dir = str(report.pop("_scan_dir", repo_dir))
             scan_temp_root = report.pop("_scan_temp_root", None)
             try:
@@ -95,6 +98,11 @@ class SkillAnalyzer:
                     "调用 LLM / 启发式规则判断 SkillSpector 命中是否误报及是否恶意",
                 )
                 filtered_issues = await self._select_malicious_issues(report, scan_dir)
+                await self._emit_progress(
+                    "Scanning for hardcoded secrets",
+                    "扫描硬编码密钥 / 凭证",
+                )
+                filtered_issues = filtered_issues + scan_directory_for_secrets(scan_dir)
                 if self.lang != "en":
                     await self._emit_progress(
                         "Localizing retained Skill findings",
@@ -486,7 +494,7 @@ class SkillAnalyzer:
             if not full_path.exists() or not full_path.is_file():
                 return ""
             text = full_path.read_text(encoding="utf-8", errors="ignore")
-            return text[: self.FILE_CONTEXT_MAX_CHARS]
+            return redact_secrets_in_text(text[: self.FILE_CONTEXT_MAX_CHARS])
         except Exception:
             return ""
 
@@ -569,6 +577,9 @@ class SkillAnalyzer:
             bool(meta.get("has_executable_scripts")),
             count_medium_low=False,
         )
+        # Policy: any hardcoded credential is a confirmed leak, never below HIGH.
+        if self._has_hardcoded_secret(issues):
+            effective_risk_score = max(effective_risk_score, 51)
         platform_score = max(0, min(100, 100 - effective_risk_score))  # higher = safer
         risk_level = self._score_to_risk_from_skillspector(effective_risk_score)
         recommendation = self.FILE_RISK_RECOMMENDATION[risk_level]
@@ -758,6 +769,27 @@ class SkillAnalyzer:
 
     def _has_counted_issue(self, issues: list[dict[str, Any]]) -> bool:
         return any(str(issue.get("severity", "")).upper() in {"HIGH", "CRITICAL"} for issue in issues)
+
+    def _has_hardcoded_secret(self, issues: list[dict[str, Any]]) -> bool:
+        return any(
+            str(issue.get("id", "")).upper().startswith("HS-")
+            or issue.get("category") == "Hardcoded Secret"
+            for issue in issues
+        )
+
+    def _redact_report_secrets(self, node: Any) -> Any:
+        """Recursively mask secret-looking values in SkillSpector report text.
+
+        SkillSpector LLM findings may quote the source verbatim; redact so a
+        leaked credential never reaches the rendered report.
+        """
+        if isinstance(node, dict):
+            return {key: self._redact_report_secrets(value) for key, value in node.items()}
+        if isinstance(node, list):
+            return [self._redact_report_secrets(value) for value in node]
+        if isinstance(node, str):
+            return redact_secrets_in_text(node)
+        return node
 
     def _detect_markdown_malicious_intent(self, file_path: str, content: str) -> list[dict[str, Any]]:
         """Detect explicit malicious data-flow instructions in SKILL.md text.
@@ -1075,6 +1107,7 @@ class SkillAnalyzer:
             "TT": ("Taint Flow", "污点传播"),
             "YR": ("YARA / Malware", "YARA / 恶意模式"),
             "MCP": ("MCP Security", "MCP 安全"),
+            "HS": ("Hardcoded Secret", "硬编码密钥"),
         }
         for prefix, labels in sorted(mapping.items(), key=lambda item: -len(item[0])):
             if rule_id.startswith(prefix):
@@ -1120,6 +1153,7 @@ class SkillAnalyzer:
             "Taint Flow": "污点传播",
             "YARA / Malware": "YARA / 恶意模式",
             "MCP Security": "MCP 安全",
+            "Hardcoded Secret": "硬编码密钥",
         }
         return mapping.get(category, category)
 
