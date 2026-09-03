@@ -354,7 +354,8 @@ class SkillAnalyzer:
     def _is_relevant_skillspector_rule(self, issue: dict[str, Any]) -> bool:
         rule_id = str(issue.get("id") or issue.get("rule_id") or "").upper()
         return (
-            rule_id.startswith(("AST", "E", "EA", "LP", "PE", "SDI", "TP", "YR", "SSD"))
+            rule_id in {"TT3", "TT4", "TT5"}
+            or rule_id.startswith(("AST", "E", "EA", "LP", "PE", "SDI", "TP", "YR", "SSD"))
             or re.fullmatch(r"P\d+", rule_id) is not None
         )
 
